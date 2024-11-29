@@ -725,3 +725,7 @@ int Addvalues (int a, int b) {
 
 // again3
 //444
+
+int multiplyValues(int a, int b) {
+    return a * b;
+}
