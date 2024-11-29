@@ -716,3 +716,9 @@ bool verifyI2CWriteRS(uint8_t address, uint8_t reg1, uint8_t value1, uint8_t reg
 }
 
 //Test for the git
+
+//2nd commit test
+int Addvalues (int a, int b) {
+    return a + b;
+}
+// change2  
