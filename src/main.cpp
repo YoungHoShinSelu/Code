@@ -714,3 +714,5 @@ bool verifyI2CWriteRS(uint8_t address, uint8_t reg1, uint8_t value1, uint8_t reg
     if(lt3966_i2c_read(address, reg2, &readback2) != 0) return false;
     return (readback1 == value1 && readback2 == value2);
 }
+
+//update and see
