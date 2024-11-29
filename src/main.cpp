@@ -418,10 +418,23 @@ void loop()
             case '1': // PWM Frequency
             {
                 Serial.println(F("\nPWM Frequency Configuration"));
-                Serial.println(F("Apply to:\n1. All Channels\n2. White\n3. Blue\n4. Green\n5. Red"));
+                Serial.println(F("Select target:\n1. All LED Modules\n2. Current LED Module Only"));
+                Serial.print(F("Enter choice: "));
+                uint8_t module_choice = readTerminalDecimal();
+                
+                if(module_choice != 1 && module_choice != 2) {
+                    Serial.println(F("\n***********Invalid module selection***********"));
+                    break;
+                }
+
+                Serial.println(F("\nConfigure channels:"));
+                Serial.println(F("1. All Channels"));
+                Serial.println(F("2. White Channel"));
+                Serial.println(F("3. Blue Channel"));
+                Serial.println(F("4. Green Channel"));
+                Serial.println(F("5. Red Channel"));
                 Serial.print(F("Enter choice: "));
                 uint8_t channel_choice = readTerminalDecimal();
-                Serial.println(channel_choice);
 
                 Serial.println(F("\nSelect PWM Frequency:"));
                 Serial.println(F("0: 31.25 kHz  (6-bit,  64 steps)"));
@@ -441,60 +454,83 @@ void loop()
                     break;
                 }
 
-                uint8_t dimh_start = 0;
-                uint8_t dimh_end = 0;
-
-                switch (channel_choice)
-                {
-                    case 1: // All Channels
-                        dimh_start = DIM1H;
-                        dimh_end = DIM4H;
-                        break;
-                    case 2: // White
-                        dimh_start = DIM1H;
-                        dimh_end = DIM1H;
-                        break;
-                    case 3: // Blue
-                        dimh_start = DIM2H;
-                        dimh_end = DIM2H;
-                        break;
-                    case 4: // Green
-                        dimh_start = DIM3H;
-                        dimh_end = DIM3H;
-                        break;
-                    case 5: // Red
-                        dimh_start = DIM4H;
-                        dimh_end = DIM4H;
-                        break;
-                    default:
-                        Serial.println(F("\n***********Invalid input***********"));
-                        break;
+                // Determine which LED modules to configure
+                const uint8_t* target_addresses;
+                uint8_t num_addresses;
+                uint8_t address_list[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
+                
+                if(module_choice == 1) {
+                    target_addresses = address_list;
+                    num_addresses = 4;
+                } else {
+                    target_addresses = &current_led_address;
+                    num_addresses = 1;
                 }
 
-                if (dimh_start != 0)
-                {
-                    for (uint8_t addr = dimh_start; addr <= dimh_end; addr += 0x10)
-                    {
-                        uint8_t current_dimh, current_diml;
-                        lt3966_i2c_read(current_led_address, addr, &current_dimh);
-                        lt3966_i2c_read(current_led_address, addr + 1, &current_diml);
+                // Configure selected channels on target modules
+                for(uint8_t addr_idx = 0; addr_idx < num_addresses; addr_idx++) {
+                    uint8_t current_address = target_addresses[addr_idx];
+                    uint8_t start_ch, end_ch;
+                    
+                    switch(channel_choice) {
+                        case 1: // All Channels
+                            start_ch = 0; end_ch = 3;
+                            break;
+                        case 2: // White
+                            start_ch = 0; end_ch = 0;
+                            break;
+                        case 3: // Blue
+                            start_ch = 1; end_ch = 1;
+                            break;
+                        case 4: // Green
+                            start_ch = 2; end_ch = 2;
+                            break;
+                        case 5: // Red
+                            start_ch = 3; end_ch = 3;
+                            break;
+                        default:
+                            Serial.println(F("\n***********Invalid channel selection***********"));
+                            continue;
+                    }
 
+                    // Update PWM frequency for selected channels
+                    for(uint8_t ch = start_ch; ch <= end_ch; ch++) {
+                        uint8_t dimh_reg = DIM1H + (ch * 0x10);
+                        uint8_t current_dimh, current_diml;
+                        
+                        if(lt3966_i2c_read(current_address, dimh_reg, &current_dimh) != 0 ||
+                           lt3966_i2c_read(current_address, dimh_reg + 1, &current_diml) != 0) {
+                            Serial.println(F("Error reading current PWM settings"));
+                            continue;
+                        }
+
+                        // Preserve duty cycle while changing frequency
                         uint8_t old_scl = (current_dimh >> 5) & 0x07;
                         uint16_t old_period = (1 << (6 + old_scl));
-                        uint16_t old_dim_value = ((current_dimh & 0x1F) << 8) | current_diml;
-                        float duty_cycle = (float)old_dim_value / old_period * 100.0;
+                        uint16_t old_value = ((current_dimh & 0x1F) << 8) | current_diml;
+                        float duty_cycle = (float)old_value / (old_period - 1) * 100.0;
 
+                        // Calculate new PWM values
                         uint16_t new_period = (1 << (6 + scl));
-                        uint16_t new_dim_value = (uint16_t)((duty_cycle / 100.0) * new_period);
-                        if (new_dim_value >= new_period) new_dim_value = new_period - 1;
+                        uint16_t new_value = (uint16_t)((duty_cycle / 100.0) * (new_period - 1));
+                        
+                        uint8_t dim_high = ((scl & 0x07) << 5) | ((new_value >> 8) & 0x1F);
+                        uint8_t dim_low = new_value & 0xFF;
 
-                        uint8_t dim_high = ((scl & 0x07) << 5) | ((new_dim_value >> 8) & 0x1F);
-                        uint8_t dim_low = new_dim_value & 0xFF;
+                        // Update with verification
+                        if(!verifyI2CWriteRS(current_address, dimh_reg, dim_high, dimh_reg + 1, dim_low)) {
+                            Serial.print(F("Error updating PWM frequency for Module 0x"));
+                            Serial.print(current_address, HEX);
+                            Serial.print(F(" Channel "));
+                            Serial.println(ch + 1);
+                            continue;
+                        }
 
-                        lt3966_i2c_write_rs(current_led_address, addr, dim_high, addr + 1, dim_low);
-                        Serial.print(F("Channel "));
-                        Serial.print((addr - DIM1H) / 0x10 + 1);
-                        Serial.println(F(" PWM Frequency Updated."));
+                        Serial.print(F("Updated Module 0x"));
+                        Serial.print(current_address, HEX);
+                        Serial.print(F(" Channel "));
+                        Serial.print(ch + 1);
+                        Serial.println(F(" PWM frequency"));
                     }
                 }
                 break;
@@ -588,65 +624,94 @@ void loop()
                 break;
             }
 
-            case '3': // INPH Configuration (moved from LED menu)
+            case '3': // INPH Configuration
             {
-                Serial.println(F("\nConfigure In-Phase Mode (INPH)"));
-                Serial.println(F("Apply to:\n1. All Channels\n2. White\n3. Blue\n4. Green\n5. Red"));
+                Serial.println(F("\nIn-Phase Mode Configuration"));
+                Serial.println(F("Select target:\n1. All LED Modules\n2. Current LED Module Only"));
                 Serial.print(F("Enter choice: "));
-                uint8_t channel_choice = readTerminalDecimal();
-                if(channel_choice == 255 || channel_choice < 1 || channel_choice > 5) {
-                    Serial.println(F("\n***********Invalid input***********"));
+                uint8_t module_choice = readTerminalDecimal();
+                
+                if(module_choice != 1 && module_choice != 2) {
+                    Serial.println(F("\n***********Invalid module selection***********"));
                     break;
                 }
-                Serial.println(channel_choice);
 
-                Serial.print(F("Set INPH to In-Phase? (Y/N): "));
-                while (Serial.available() == 0);
+                Serial.println(F("\nConfigure channels:"));
+                Serial.println(F("1. All Channels"));
+                Serial.println(F("2. White Channel"));
+                Serial.println(F("3. Blue Channel"));
+                Serial.println(F("4. Green Channel"));
+                Serial.println(F("5. Red Channel"));
+                Serial.print(F("Enter choice: "));
+                uint8_t channel_choice = readTerminalDecimal();
+
+                Serial.print(F("\nSet INPH to In-Phase? (Y/N): "));
+                while(!Serial.available());
                 char inph_input = Serial.read();
                 Serial.println(inph_input);
                 bool set_inph = (inph_input == 'Y' || inph_input == 'y');
 
-                uint8_t cfg_address_start = 0;
-                uint8_t cfg_address_end = 0;
-
-                switch (channel_choice)
-                {
-                    case 1: // All Channels
-                        cfg_address_start = CFG1;
-                        cfg_address_end = CFG4;
-                        break;
-                    case 2: // White
-                        cfg_address_start = CFG1;
-                        cfg_address_end = CFG1;
-                        break;
-                    case 3: // Blue
-                        cfg_address_start = CFG2;
-                        cfg_address_end = CFG2;
-                        break;
-                    case 4: // Green
-                        cfg_address_start = CFG3;
-                        cfg_address_end = CFG3;
-                        break;
-                    case 5: // Red
-                        cfg_address_start = CFG4;
-                        cfg_address_end = CFG4;
-                        break;
-                    default:
-                        Serial.println(F("\n***********Invalid input***********"));
-                        break;
+                // Determine which LED modules to configure
+                const uint8_t* target_addresses;
+                uint8_t num_addresses;
+                uint8_t address_list[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
+                
+                if(module_choice == 1) {
+                    target_addresses = address_list;
+                    num_addresses = 4;
+                } else {
+                    target_addresses = &current_led_address;
+                    num_addresses = 1;
                 }
 
-                if (cfg_address_start != 0)
-                {
-                    for (uint8_t addr = cfg_address_start; addr <= cfg_address_end; addr += 0x10)
-                    {
-                        uint8_t cfg_value = 0x03; // Start with both DIMEN and ICTRL enabled
-                        if (set_inph)
-                            cfg_value |= (1 << 3); // Add INPH bit if requested
-                        lt3966_i2c_write(current_led_address, addr, cfg_value);
-                        Serial.print(F("Channel "));
-                        Serial.print((addr - CFG1) / 0x10 + 1);
-                        Serial.println(F(" Configuration Updated."));
+                // Configure selected channels on target modules
+                for(uint8_t addr_idx = 0; addr_idx < num_addresses; addr_idx++) {
+                    uint8_t current_address = target_addresses[addr_idx];
+                    uint8_t start_ch, end_ch;
+                    
+                    switch(channel_choice) {
+                        case 1: // All Channels
+                            start_ch = 0; end_ch = 3;
+                            break;
+                        case 2: // White
+                            start_ch = 0; end_ch = 0;
+                            break;
+                        case 3: // Blue
+                            start_ch = 1; end_ch = 1;
+                            break;
+                        case 4: // Green
+                            start_ch = 2; end_ch = 2;
+                            break;
+                        case 5: // Red
+                            start_ch = 3; end_ch = 3;
+                            break;
+                        default:
+                            Serial.println(F("\n***********Invalid channel selection***********"));
+                            continue;
+                    }
+
+                    // Update INPH for selected channels
+                    for(uint8_t ch = start_ch; ch <= end_ch; ch++) {
+                        uint8_t cfg_reg = CFG1 + (ch * 0x10);
+                        uint8_t cfg_value = 0x03; // DIMEN and ICTRL enabled
+                        
+                        if(set_inph) {
+                            cfg_value |= (1 << 3); // Set INPH bit
+                        }
+
+                        if(!verifyI2CWrite(current_address, cfg_reg, cfg_value)) {
+                            Serial.print(F("Error updating INPH for Module 0x"));
+                            Serial.print(current_address, HEX);
+                            Serial.print(F(" Channel "));
+                            Serial.println(ch + 1);
+                            continue;
+                        }
+
+                        Serial.print(F("Updated Module 0x"));
+                        Serial.print(current_address, HEX);
+                        Serial.print(F(" Channel "));
+                        Serial.print(ch + 1);
+                        Serial.println(F(" INPH configuration"));
                     }
                 }
                 break;
@@ -714,6 +779,3 @@ bool verifyI2CWriteRS(uint8_t address, uint8_t reg1, uint8_t value1, uint8_t reg
     if(lt3966_i2c_read(address, reg2, &readback2) != 0) return false;
     return (readback1 == value1 && readback2 == value2);
 }
-
-//update and see
-//working now?
