@@ -716,3 +716,4 @@ bool verifyI2CWriteRS(uint8_t address, uint8_t reg1, uint8_t value1, uint8_t reg
 }
 
 //update and see
+//working now?
