@@ -7,7 +7,7 @@
 
 // New LED module addresses - ADD THESE BEFORE setup()
 #define LT3966_ADD1  0b1111   // ADD1: VCC, ADD2: VCC (0x5F)
-#define LT3966_ADD2  0b0111   // ADD1: VCC, ADD2: FLOAT (0x57)  
+#define LT3966_ADD2  0b0011   // ADD1: VCC, ADD2: FLOAT (0x57)  New module ADD1: Flaot, ADD2: GND (0x53;0011)
 #define LT3966_ADD3  0b0001   // ADD1: FLOAT, ADD2: GND (0x51)
 #define LT3966_ADD4  0b0101   // ADD1: FLOAT, ADD2: FLOAT (0x55)
 
@@ -22,6 +22,7 @@ void printPaddedBinary(uint8_t value);
 void verifyConfiguration(uint8_t address);
 uint16_t calculatePWM(float duty_cycle, uint8_t scl);
 bool verifyI2CWriteRS(uint8_t address, uint8_t reg1, uint8_t value1, uint8_t reg2, uint8_t value2);
+bool verifyI2CWrite(uint8_t address, uint8_t reg, uint8_t value);
 
 // Add this helper function at the top with other function declarations
 String readSerialUntilEnter() {
@@ -418,11 +419,16 @@ void loop()
             case '1': // PWM Frequency
             {
                 Serial.println(F("\nPWM Frequency Configuration"));
-                Serial.println(F("Select target:\n1. All LED Modules\n2. Current LED Module Only"));
+                Serial.println(F("Select LED Module:"));
+                Serial.println(F("1. All LED Modules"));
+                Serial.println(F("2. LED 1 (0x5F)"));
+                Serial.println(F("3. LED 2 (0x57)"));
+                Serial.println(F("4. LED 3 (0x51)"));
+                Serial.println(F("5. LED 4 (0x55)"));
                 Serial.print(F("Enter choice: "));
                 uint8_t module_choice = readTerminalDecimal();
                 
-                if(module_choice != 1 && module_choice != 2) {
+                if(module_choice < 1 || module_choice > 5) {
                     Serial.println(F("\n***********Invalid module selection***********"));
                     break;
                 }
@@ -463,7 +469,7 @@ void loop()
                     target_addresses = address_list;
                     num_addresses = 4;
                 } else {
-                    target_addresses = &current_led_address;
+                    target_addresses = &address_list[module_choice - 2]; // Adjust index for single module selection
                     num_addresses = 1;
                 }
 
@@ -627,11 +633,16 @@ void loop()
             case '3': // INPH Configuration
             {
                 Serial.println(F("\nIn-Phase Mode Configuration"));
-                Serial.println(F("Select target:\n1. All LED Modules\n2. Current LED Module Only"));
+                Serial.println(F("Select LED Module:"));
+                Serial.println(F("1. All LED Modules"));
+                Serial.println(F("2. LED 1 (0x5F)"));
+                Serial.println(F("3. LED 2 (0x57)"));
+                Serial.println(F("4. LED 3 (0x51)"));
+                Serial.println(F("5. LED 4 (0x55)"));
                 Serial.print(F("Enter choice: "));
                 uint8_t module_choice = readTerminalDecimal();
                 
-                if(module_choice != 1 && module_choice != 2) {
+                if(module_choice < 1 || module_choice > 5) {
                     Serial.println(F("\n***********Invalid module selection***********"));
                     break;
                 }
@@ -660,7 +671,7 @@ void loop()
                     target_addresses = address_list;
                     num_addresses = 4;
                 } else {
-                    target_addresses = &current_led_address;
+                    target_addresses = &address_list[module_choice - 2]; // Adjust index for single module selection
                     num_addresses = 1;
                 }
 

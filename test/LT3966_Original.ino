@@ -7,7 +7,7 @@
 #include <Wire.h>
 
 #define ALERT_PIN   12
-#define LT3966_ADD  0b0111
+#define LT3966_ADD  0b1111
 
 #define B7      0x80
 #define B6      0x40
