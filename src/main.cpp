@@ -6,6 +6,7 @@
 #include "Linduino.h"
 #include "LT3966.h"
 #include <EEPROM.h>
+#include "RTClib.h"
 
 // New LED module addresses - ADD THESE BEFORE setup()
 #define LT3966_ADD1  0b1111   // ADD1: VCC, ADD2: VCC (0x5F)
@@ -39,79 +40,47 @@ uint16_t calculatePWM(float duty_cycle, uint8_t scl);
 bool verifyI2CWriteRS(uint8_t address, uint8_t reg1, uint8_t value1, uint8_t reg2, uint8_t value2);
 bool verifyI2CWrite(uint8_t address, uint8_t reg, uint8_t value);
 
-// Add this helper function at the top with other function declarations
-String readSerialUntilEnter() {
-    String input = "";
-    bool newLine = false;
+// 1. Improved Serial Input Handling
+#define SERIAL_TIMEOUT 10000  // 10 second timeout
+#define INPUT_BUFFER_SIZE 32
+
+char* readSerialUntilEnter() {
+    static char buffer[INPUT_BUFFER_SIZE];
+    unsigned long startTime = millis();
+    uint8_t index = 0;
     
-    while (!newLine) {
+    // Clear buffer
+    memset(buffer, 0, INPUT_BUFFER_SIZE);
+    
+    while ((millis() - startTime) < SERIAL_TIMEOUT) {
         if (Serial.available()) {
             char c = Serial.read();
             
-            // Handle backspace
-            if (c == '\b' || c == 127) {  // 127 is also backspace on some terminals
-                if (input.length() > 0) {
-                    input.remove(input.length() - 1);
-                    Serial.print("\b \b");  // Erase character from terminal
+            if (c == '\r' || c == '\n') {
+                if (index > 0) {
+                    buffer[index] = '\0';
+                    return buffer;
                 }
             }
-            // Handle line endings
-            else if (c == '\r' || c == '\n') {
-                if (input.length() > 0) {
-                    newLine = true;
-                }
+            else if (c == '\b' && index > 0) {  // Backspace
+                index--;
+                Serial.print("\b \b");
             }
-            // Only add printable characters to input
-            else if (c >= 32 && c <= 126) {
-                input += c;
-                Serial.print(c); // Echo the character back
+            else if (index < (INPUT_BUFFER_SIZE - 1) && isprint(c)) {
+                buffer[index++] = c;
+                Serial.print(c);
             }
         }
     }
-    Serial.println(); // Add a newline after input
-    return input;
+    
+    // Timeout occurred
+    return NULL;
 }
 
-float readfloatTerminal()
-{
-    String input = readSerialUntilEnter();
-    return input.toFloat();
-}
-
-uint8_t readTerminalDecimal()
-{
-    String input = readSerialUntilEnter();
-    if(input.length() == 0) {
-        return 255; // Return invalid value
-    }
-    
-    // Convert string to integer
-    uint8_t value = input.toInt();
-    
-    // Verify the conversion was successful
-    if(value == 0 && input[0] != '0') {
-        return 255; // Return invalid value if conversion failed
-    }
-    
-    return value;
-}
-
-void printPaddedBinary(uint8_t value)
-{
-    uint8_t mask = 0b10000000;
-    while(mask != 0)
-    {
-        if((mask & value) != mask)
-        {
-            Serial.print("0");
-        }
-        else
-        {
-            Serial.print("1");
-        }
-        mask = mask >> 1;
-    }
-    return;
+// Input validation for numerical values
+bool parseFloat(const char* input, float& result) {
+    result = atof(input);
+    return (input[0] != '\0' && isdigit(input[0]));  // Basic validation
 }
 
 // LCD instance
@@ -183,11 +152,22 @@ class LogManager;
 extern LogManager logManager;
 extern RunningStats stats;
 
+RTC_DS3231 rtc;  // Create RTC object
+
 void setup() {
     Wire.begin();
     Serial.begin(9600);
     lcd.begin(16, 2);
     lcd.setBacklight(WHITE);
+    
+    if (!rtc.begin()) {
+        if (debug_mode) Serial.println("Couldn't find RTC");
+    }
+    
+    if (rtc.lostPower()) {
+        // RTC lost power, set to compile time
+        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    }
     
     // Initialize all LED modules
     const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
@@ -448,7 +428,6 @@ void handleIndividualControl(uint8_t buttons) {
 }
 
 void handleStatusSettings(uint8_t buttons) {
-    // Move static variables to global scope
     static uint8_t statusPage = 0;
     static uint8_t currentLED = 0;
     const char* status_items[] = {"View Status", "PWM Resolution", "Monitor Current"};
@@ -469,6 +448,8 @@ void handleStatusSettings(uint8_t buttons) {
     
     if (buttons & BUTTON_SELECT) {
         const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
+        uint8_t led_current;
+        
         switch(statusPosition) {
             case 0: // View Status
                 if (buttons & BUTTON_RIGHT) statusPage = (statusPage + 1) % 4;
@@ -493,32 +474,20 @@ void handleStatusSettings(uint8_t buttons) {
             case 1: // PWM Resolution
                 if (buttons & BUTTON_RIGHT) {
                     currentPWMResolution = min(13, currentPWMResolution + 1);
-                } else if (buttons & BUTTON_LEFT) {
-                    currentPWMResolution = max(6, currentPWMResolution - 1);
-                }
-                // Apply new resolution
-                uint8_t scl = currentPWMResolution - 6;
-                for(uint8_t i = 0; i < 4; i++) {
-                    for(uint8_t ch = 0; ch < 4; ch++) {
-                        uint8_t dimh_reg = DIM1H + (ch * 0x10);
-                        uint8_t current_value;
-                        lt3966_i2c_read(addresses[i], dimh_reg, &current_value);
-                        uint8_t new_value = (scl << 5) | (current_value & 0x1F);
-                        lt3966_i2c_write(addresses[i], dimh_reg, new_value);
+                    for(uint8_t i = 0; i < 4; i++) {
+                        setPWMDutyCycle(addresses[i], 0, currentBrightness);
                     }
                 }
                 break;
                 
             case 2: // Monitor Current
-                if (buttons & BUTTON_RIGHT) currentLED = (currentLED + 1) % 4;
-                
-                lcd.clear();
-                uint8_t led_current;
-                lt3966_i2c_read(addresses[currentLED], ILED1, &led_current);
-                float current_ma = (led_current / 255.0) * 120.0;
-                lcd.print("LED" + String(currentLED+1) + " Current:");
-                lcd.setCursor(0, 1);
-                lcd.print(String(current_ma, 1) + "mA");
+                if (buttons & BUTTON_RIGHT) {
+                    lt3966_i2c_read(addresses[currentLED], ILED1, &led_current);
+                    float current_ma = (led_current / 255.0) * 120.0;
+                    lcd.print("LED" + String(currentLED+1) + " Current:");
+                    lcd.setCursor(0, 1);
+                    lcd.print(String(current_ma, 1) + "mA");
+                }
                 break;
         }
     }
@@ -531,13 +500,6 @@ void handleStatusSettings(uint8_t buttons) {
         lcd.print("  " + String(status_items[statusPosition + 1]));
     }
 }
-
-// Define button values
-#define BUTTON_UP     (uint8_t)0x08
-#define BUTTON_DOWN   (uint8_t)0x04
-#define BUTTON_LEFT   (uint8_t)0x01
-#define BUTTON_RIGHT  (uint8_t)0x02
-#define BUTTON_SELECT (uint8_t)0x10
 
 // Add before loop()
 void handleMainMenu(uint8_t buttons) {
@@ -850,3 +812,114 @@ void loadSettings() {
         EEPROM.put(EEPROM.length() - sizeof(SavedSettings), settings);
     }
 }
+
+// 2. Improved EEPROM Management
+class EEPROMManager {
+private:
+    static const uint16_t EEPROM_SIZE = 1024;  // Arduino UNO
+    static const uint16_t WEAR_COUNT_ADDR = 0;
+    static const uint16_t DATA_START_ADDR = 16;
+    static const uint8_t MAX_WEAR_COUNT = 255;  // Limit to uint8_t max value
+    
+    struct BlockHeader {
+        uint16_t checksum;
+        uint8_t version;
+        uint8_t status;  // 0xFF = empty, 0x00 = active, 0x01 = obsolete
+    };
+    
+    // Calculate CRC16 checksum
+    uint16_t calculateCRC(const uint8_t* data, size_t length) {
+        uint16_t crc = 0xFFFF;
+        for (size_t i = 0; i < length; i++) {
+            crc ^= data[i];
+            for (uint8_t j = 0; j < 8; j++) {
+                if (crc & 0x0001) {
+                    crc = (crc >> 1) ^ 0xA001;
+                } else {
+                    crc = crc >> 1;
+                }
+            }
+        }
+        return crc;
+    }
+    
+    // Find next available block
+    uint16_t findNextBlock() {
+        uint16_t addr = DATA_START_ADDR;
+        while (addr < EEPROM_SIZE) {
+            BlockHeader header;
+            EEPROM.get(addr, header);
+            if (header.status == 0xFF) {
+                return addr;
+            }
+            addr += sizeof(BlockHeader) + sizeof(ChannelLog);
+        }
+        return 0;  // No space available
+    }
+
+public:
+    bool writeLog(ChannelLog& log, uint8_t led, uint8_t channel) {
+        noInterrupts();  // Ensure atomic operation
+        
+        uint16_t addr = findNextBlock();
+        if (addr == 0) {
+            // No space - need to compact
+            compactStorage();
+            addr = findNextBlock();
+            if (addr == 0) {
+                interrupts();
+                return false;
+            }
+        }
+        
+        BlockHeader header;
+        header.version = 1;
+        header.status = 0x00;
+        header.checksum = calculateCRC((uint8_t*)&log, sizeof(ChannelLog));
+        
+        // Write header and data
+        EEPROM.put(addr, header);
+        EEPROM.put(addr + sizeof(BlockHeader), log);
+        
+        // Update wear count
+        uint32_t wearCount;
+        EEPROM.get(WEAR_COUNT_ADDR, wearCount);
+        if (++wearCount >= MAX_WEAR_COUNT) {
+            // Handle wear limit reached
+            handleWearLimitReached();
+        }
+        EEPROM.put(WEAR_COUNT_ADDR, wearCount);
+        
+        interrupts();
+        return true;
+    }
+    
+    bool readLog(ChannelLog& log, uint8_t led, uint8_t channel) {
+        uint16_t addr = findLatestLog(led, channel);
+        if (addr == 0) return false;
+        
+        BlockHeader header;
+        EEPROM.get(addr, header);
+        EEPROM.get(addr + sizeof(BlockHeader), log);
+        
+        // Verify checksum
+        uint16_t calculatedCRC = calculateCRC((uint8_t*)&log, sizeof(ChannelLog));
+        return (calculatedCRC == header.checksum);
+    }
+    
+private:
+    void compactStorage() {
+        // Implement storage compaction
+        // Move valid blocks to beginning, erase old blocks
+    }
+    
+    void handleWearLimitReached() {
+        // Implement wear limit handling
+        // Could rotate blocks, alert user, etc.
+    }
+    
+    uint16_t findLatestLog(uint8_t led, uint8_t channel) {
+        // Find most recent valid log for given LED/channel
+        return 0;  // Implement actual search
+    }
+};

@@ -1,4 +1,3 @@
-
 /*!
 LT_I2C: Routines to communicate with ATmega328P's hardware I2C port.
 
@@ -491,34 +490,30 @@ int8_t i2c_write(uint8_t data)
 uint8_t i2c_read(int8_t ack)
 {
   uint8_t result;
-  uint8_t return_value = 1;
   uint16_t timeout;
   uint8_t data;
-  if (ack == 0)
-  {
-    TWCR=(1<<TWINT) | (1<<TWEN) | (1<<TWEA);                //! 1) START transaction with ack
-    for (timeout = 0; timeout < HW_I2C_TIMEOUT; timeout++)  //! 2) START timeout loop
-    {
+  
+  if (ack == 0) {
+    TWCR=(1<<TWINT) | (1<<TWEN) | (1<<TWEA);
+    for (timeout = 0; timeout < HW_I2C_TIMEOUT; timeout++) {
       _delay_us(1);
-      if (TWCR & (1 << TWINT)) break;                       //! 3) Check the TWINT bit in TWCR
+      if (TWCR & (1 << TWINT)) break;
     }
-    data = TWDR;                                            //! 4) Get data
-    result = TWSR & 0xF8;                                   //! 5) Update status
-    if (result == STATUS_READ_ACK) return_value = 0;
+    data = TWDR;
+    result = TWSR & 0xF8;
+    if (result != STATUS_READ_ACK) return 0;  // Error case
   }
-  else
-  {
-    TWCR=(1<<TWINT) | (1<<TWEN);                            //! 6) START transaction with NACK
-    for (timeout = 0; timeout < HW_I2C_TIMEOUT; timeout++)
-    {
+  else {
+    TWCR=(1<<TWINT) | (1<<TWEN);
+    for (timeout = 0; timeout < HW_I2C_TIMEOUT; timeout++) {
       _delay_us(1);
-      if (TWCR & (1 << TWINT)) break;                       //! 7) Check the TWINT bit in TWCR
+      if (TWCR & (1 << TWINT)) break;
     }
-    data = TWDR;                                            //! 8) Get data
-    result = TWSR & 0xF8;                                   //! 9) Update status
-    if (result == STATUS_READ_NACK) return_value = 0;
+    data = TWDR;
+    result = TWSR & 0xF8;
+    if (result != STATUS_READ_NACK) return 0;  // Error case
   }
-  return(data);
+  return data;
 }
 
 // Poll the I2C port and look for an acknowledge

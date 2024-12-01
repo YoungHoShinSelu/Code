@@ -1,4 +1,3 @@
-
 /*!
 LT3966: Functions to interface with LT3966 over Linduino I2C bus.
 
@@ -202,21 +201,19 @@ int8_t lt3966_i2c_read(uint8_t chipAdd, uint8_t subAdd, uint8_t *data)
  */
 int8_t lt3966_i2c_broadcast_read(uint8_t *value)
 {
-  uint8_t bcRead = 0;
-  int8_t ret = 0;
-  if(i2c_start() != 0)
-    return(1);
-  ret |= i2c_write(BC_READ);
-  if(ret != 0)
-  {
+    int8_t ret = 0;
+    if(i2c_start() != 0)
+        return(1);
+    ret |= i2c_write(BC_READ);
+    if(ret != 0) {
+        i2c_stop();
+        return(1);
+    }
+    *value = i2c_read(WITH_ACK);  // Store directly in output parameter
     i2c_stop();
-    return(1);
-  }
-  bcRead = i2c_read(WITH_ACK);
-  i2c_stop();
-  if(ret != 0)
-    return(1);
-  return(0);
+    if(ret != 0)
+        return(1);
+    return(0);
 }
 
 
