@@ -1,3 +1,4 @@
+
 #include <Arduino.h>
 #include <stdint.h>
 #include <Wire.h>
@@ -7,6 +8,9 @@
 #include "LT3966.h"
 #include <EEPROM.h>
 #include "RTClib.h"
+#include <util/crc16.h>  // For CRC calculation
+#include <Adafruit_PCT2075.h>
+
 
 // New LED module addresses - ADD THESE BEFORE setup()
 #define LT3966_ADD1  0b1111   // ADD1: VCC, ADD2: VCC (0x5F)
@@ -18,7 +22,21 @@
 uint8_t current_led_address = LT3966_ADD1; // Default to first LED
 bool debug_mode = true;  // Enable debugging output
 
-// Add with other function declarations (around line 27)
+// Add these near the top of the file, after the #includes but before any function declarations
+
+// Forward declare the PWM configuration structures
+struct PWMFreqConfig {
+    uint8_t scl;
+    uint16_t freq;    // Frequency in Hz
+    uint8_t bits;     // Resolution in bits
+    const char* desc; // Description
+};
+
+// Forward declare the PWM functions
+void handlePWMFrequencyConfig(uint8_t buttons);
+void applyPWMFrequency(uint8_t ledSelect, uint8_t channelSelect, uint8_t freqSelect);
+
+// Then with other function declarations
 void initializeLogging();
 void loadSettings();
 void handleMainMenu(uint8_t buttons);
@@ -84,14 +102,16 @@ bool parseFloat(const char* input, float& result) {
 }
 
 // LCD instance
-Adafruit_RGBLCDShield lcd;
+Adafruit_RGBLCDShield lcd = Adafruit_RGBLCDShield();
 
 // LCD backlight color definitions
-#define WHITE 0x7
-#define RED   0x1
+#define RED 0x1
+#define YELLOW 0x3
 #define GREEN 0x2
-#define BLUE  0x4
-#define YELLOW (RED | GREEN)
+#define TEAL 0x6
+#define BLUE 0x4
+#define VIOLET 0x5
+#define WHITE 0x7
 
 // Time structure for better readability
 struct TimeStamp {
@@ -152,31 +172,457 @@ class LogManager;
 extern LogManager logManager;
 extern RunningStats stats;
 
-RTC_DS3231 rtc;  // Create RTC object
+// Define RTC address
+#define DS3231_ADDRESS 0x68
+
+// Modify RTC instance declaration
+RTC_DS3231 rtc;  // The address is handled internally by the library
+
+// Add before BlockHeader
+struct __attribute__((packed)) MetaData {
+    uint32_t wearCount;
+    uint16_t lastSequence;
+    uint16_t checksum;
+} __attribute__((aligned(4)));
+
+// Modify existing BlockHeader structure
+struct __attribute__((packed)) BlockHeader {
+    static const uint32_t MAGIC = 0xEEDB1000;
+    static const uint8_t CURRENT_VERSION = 1;
+    
+    uint32_t magicNumber;
+    uint16_t blockSize;
+    uint16_t version;
+    uint8_t status;
+    uint8_t wearCount;
+    uint8_t led;
+    uint8_t channel;
+    uint32_t crc32;
+    uint16_t sequence;
+    uint16_t reserved;  // For future expansion
+    
+    bool isValid() const {
+        return magicNumber == MAGIC && 
+               version <= CURRENT_VERSION &&
+               blockSize <= 1024 &&
+               blockSize % 32 == 0;
+    }
+} __attribute__((aligned(4)));
+
+struct __attribute__((packed)) RecoveryBlock {
+    uint16_t targetAddr;
+    uint8_t operationType;
+    uint32_t timestamp;
+    uint32_t crc32;
+    uint8_t data[16];
+} __attribute__((aligned(4)));
+
+// Add after BlockHeader structure
+struct __attribute__((packed)) ErrorInfo {
+    enum class ErrorType {
+        WRITE_FAILURE,
+        CRC_MISMATCH,
+        ALIGNMENT_ERROR,
+        TIMEOUT,
+        WEAR_LIMIT,
+        POWER_LOSS,
+        INIT_FAILURE,
+        TEMP_WARNING,
+        WEAR_WARNING
+    };
+    
+    ErrorType type;
+    uint16_t address;
+    uint32_t timestamp;
+    uint8_t retryCount;
+};
+
+// Add after other structures
+struct RuntimeLog {
+    DateTime startTime;
+    DateTime endTime;
+    uint8_t led;
+    uint8_t channel;
+    float current_mA;
+    uint8_t pwmResolution;
+    bool inPhaseMode;
+    float temperature;
+};
+
+class RuntimeTracker {
+private:
+    static const uint16_t LOG_START_ADDR = 512;  // Use second half of EEPROM
+    static const uint8_t LOGS_PER_CHANNEL = 4;   // Store last 4 entries per channel
+    
+public:
+    void logChannelStart(uint8_t led, uint8_t channel, float current) {
+        RuntimeLog log;
+        log.startTime = rtc.now();
+        log.led = led;
+        log.channel = channel;
+        log.current_mA = current;
+        log.pwmResolution = currentPWMResolution;
+        log.temperature = rtc.getTemperature();
+        
+        uint16_t addr = getLogAddress(led, channel);
+        EEPROM.put(addr, log);
+    }
+    
+    void logChannelStop(uint8_t led, uint8_t channel) {
+        uint16_t addr = getLogAddress(led, channel);
+        RuntimeLog log;
+        EEPROM.get(addr, log);
+        log.endTime = rtc.now();
+        EEPROM.put(addr, log);
+    }
+
+private:
+    uint16_t getLogAddress(uint8_t led, uint8_t channel) {
+        return LOG_START_ADDR + 
+               (led * 4 + channel) * sizeof(RuntimeLog) * LOGS_PER_CHANNEL;
+    }
+};
+
+// Add these declarations right after the includes, before any functions
+#include <Adafruit_PCT2075.h>
+
+// Global variables and constants (add with other globals)
+Adafruit_PCT2075 tempsensor;
+static const uint16_t TEMP_LOG_ADDR = 960;
+static const float TEMP_WARNING_THRESHOLD = 40.0;  // Move this here too
+
+// Remove these declarations from their current locations:
+// #define TEMP_WARNING_THRESHOLD 40.0  // Remove this
+// static const uint16_t TEMP_LOG_ADDR = 960;  // Remove this
+// Adafruit_PCT2075 tempsensor;  // Remove this
+
+// Forward declare all classes
+class SafeEEPROMManager;
+class WearLevelingManager;
+class ErrorTracker;
+class BoundaryManager;
+class PowerLossRecovery;
+class SystemManager;
+
+// Declare global instance after all class definitions
+extern SystemManager systemManager;
+
+// Then define classes in correct order
+class SafeEEPROMManager {
+public:
+    bool verifyWrite(uint16_t addr, const void* data, size_t len);
+    bool writeWithVerification(uint16_t addr, const void* data, size_t len);
+    
+private:
+    // Constants
+    static const uint16_t BLOCK_SIZE = 32;
+    static const uint16_t META_ADDR = 0;
+    static const uint16_t DATA_START = 64;
+    static const uint16_t RECOVERY_ADDR = 32;
+    static const uint32_t WEAR_WARNING_THRESHOLD = 90000;
+    static const unsigned long TIMEOUT_MS = 1000;
+    
+    bool operationInProgress;
+
+    void handleInterruptedOperation();
+    void clearRecoveryPoint();
+    uint32_t calculateCRC32(const void* data, size_t len);
+    void compactStorage();
+    void handleWearLimitReached();
+    uint16_t findLatestLog(uint8_t led, uint8_t channel);
+    uint16_t findNextBlock();
+};
+
+class WearLevelingManager {
+public:
+    bool write(uint16_t addr, const void* data, size_t len);
+    void updateWearCount(uint16_t addr);
+private:
+    uint32_t wearCounts[512];  // Track wear for each block
+};
+
+class ErrorTracker {
+public:
+    void logError(ErrorInfo::ErrorType type, uint16_t address);
+    void clearErrors();
+    bool hasErrors() const;
+private:
+    static const uint8_t MAX_ERRORS = 10;
+    ErrorInfo errors[MAX_ERRORS];
+    uint8_t errorCount;
+};
+
+class BoundaryManager {
+public:
+    bool checkBoundary(uint16_t addr, size_t len);
+    void setProtectedRegion(uint16_t start, uint16_t end);
+private:
+    uint16_t protectedStart;
+    uint16_t protectedEnd;
+};
+
+class PowerLossRecovery {
+public:
+    void saveRecoveryPoint(uint16_t addr, const void* data, size_t len);
+    bool needsRecovery();
+    void performRecovery();
+private:
+    RecoveryBlock recoveryData;
+    bool writeWithVerification(uint16_t addr, const void* data, size_t len);
+    uint32_t calculateCRC32(const void* data, size_t len);
+};
+
+class SystemManager {
+public:
+    bool initialize() {
+        Wire.begin();
+        // Initialize all subsystems
+        return true;
+    }
+    
+    void update() {
+        // Don't try to read temperature if sensor isn't initialized
+        if (tempsensor.begin(0x48)) {  // Only read if sensor exists
+            handleTemperature();
+        }
+        checkErrors();
+        updateDisplay();
+    }
+    
+private:
+    void handleTemperature();
+    void checkErrors();
+    void updateDisplay();
+    
+    SafeEEPROMManager eepromManager;
+    WearLevelingManager wearManager;
+    ErrorTracker errorTracker;
+    BoundaryManager boundaryManager;
+    PowerLossRecovery powerLossRecovery;
+};
+
+// Define the global instance
+SystemManager systemManager;
+
+// Add these constants for PWM configuration
+const PWMFreqConfig PWM_CONFIGS[] = {
+    {0, 31250,  6, "31.25 kHz  (6-bit,  64 steps)"},
+    {1, 15625,  7, "15.625 kHz (7-bit,  128 steps)"},
+    {2, 7812,   8, "7.8125 kHz (8-bit,  256 steps)"},
+    {3, 3906,   9, "3.906 kHz  (9-bit,  512 steps)"},
+    {4, 1953,   10, "1.953 kHz  (10-bit, 1024 steps)"},
+    {5, 977,    11, "976.6 Hz   (11-bit, 2048 steps)"},
+    {6, 488,    12, "488.3 Hz   (12-bit, 4096 steps)"},
+    {7, 244,    13, "244.14 Hz  (13-bit, 8192 steps)"}
+};
+
+// Add this function to handle PWM frequency configuration
+void handlePWMFrequencyConfig(uint8_t buttons) {
+    static uint8_t menuState = 0;  // 0: LED select, 1: Channel select, 2: Frequency select
+    static uint8_t selectedLED = 0;
+    static uint8_t selectedChannel = 0;
+    static uint8_t selectedFreq = 0;
+    
+    switch(menuState) {
+        case 0:  // LED Selection
+            lcd.clear();
+            lcd.print("Select LED:");
+            lcd.setCursor(0, 1);
+            if(selectedLED == 0) {
+                lcd.print("All LEDs");
+            } else {
+                lcd.print("LED ");
+                lcd.print(selectedLED);
+            }
+            
+            if(buttons & BUTTON_UP) {
+                if(selectedLED > 0) selectedLED--;
+            }
+            if(buttons & BUTTON_DOWN) {
+                if(selectedLED < 4) selectedLED++;
+            }
+            if(buttons & BUTTON_SELECT) {
+                menuState = 1;
+            }
+            break;
+            
+        case 1:  // Channel Selection
+            lcd.clear();
+            lcd.print("Select Channel:");
+            lcd.setCursor(0, 1);
+            switch(selectedChannel) {
+                case 0: lcd.print("All Channels"); break;
+                case 1: lcd.print("White"); break;
+                case 2: lcd.print("Blue"); break;
+                case 3: lcd.print("Green"); break;
+                case 4: lcd.print("Red"); break;
+            }
+            
+            if(buttons & BUTTON_UP) {
+                if(selectedChannel > 0) selectedChannel--;
+            }
+            if(buttons & BUTTON_DOWN) {
+                if(selectedChannel < 4) selectedChannel++;
+            }
+            if(buttons & BUTTON_SELECT) {
+                menuState = 2;
+            }
+            break;
+            
+        case 2:  // Frequency Selection
+            lcd.clear();
+            lcd.print("PWM Frequency:");
+            lcd.setCursor(0, 1);
+            lcd.print(PWM_CONFIGS[selectedFreq].freq);
+            lcd.print("Hz ");
+            lcd.print(PWM_CONFIGS[selectedFreq].bits);
+            lcd.print("bit");
+            
+            if(buttons & BUTTON_UP) {
+                if(selectedFreq > 0) selectedFreq--;
+            }
+            if(buttons & BUTTON_DOWN) {
+                if(selectedFreq < 7) selectedFreq++;
+            }
+            if(buttons & BUTTON_SELECT) {
+                // Apply the frequency settings
+                applyPWMFrequency(selectedLED, selectedChannel, selectedFreq);
+                menuState = 0;  // Return to LED selection
+            }
+            break;
+    }
+    
+    if(buttons & BUTTON_LEFT && menuState > 0) {
+        menuState--;
+    }
+}
+
+// Function to apply PWM frequency settings
+void applyPWMFrequency(uint8_t ledSelect, uint8_t channelSelect, uint8_t freqSelect) {
+    const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
+    uint8_t scl = PWM_CONFIGS[freqSelect].scl;
+    
+    // Determine which LEDs to configure
+    uint8_t startLED = (ledSelect == 0) ? 0 : ledSelect - 1;
+    uint8_t endLED = (ledSelect == 0) ? 3 : ledSelect - 1;
+    
+    // Determine which channels to configure
+    uint8_t startCh = (channelSelect == 0) ? 0 : channelSelect - 1;
+    uint8_t endCh = (channelSelect == 0) ? 3 : channelSelect - 1;
+    
+    // Configure selected LEDs and channels
+    for(uint8_t led = startLED; led <= endLED; led++) {
+        for(uint8_t ch = startCh; ch <= endCh; ch++) {
+            uint8_t dimh_reg = DIM1H + (ch * 0x10);
+            uint8_t current_dimh, current_diml;
+            
+            // Read current settings
+            lt3966_i2c_read(addresses[led], dimh_reg, &current_dimh);
+            lt3966_i2c_read(addresses[led], dimh_reg + 1, &current_diml);
+            
+            // Preserve duty cycle while changing frequency
+            uint8_t old_scl = (current_dimh >> 5) & 0x07;
+            uint16_t old_period = (1 << (6 + old_scl));
+            uint16_t old_value = ((current_dimh & 0x1F) << 8) | current_diml;
+            float duty_cycle = (float)old_value / (old_period - 1) * 100.0;
+            
+            // Calculate new PWM values
+            uint16_t new_period = (1 << (6 + scl));
+            uint16_t new_value = (uint16_t)((duty_cycle / 100.0) * (new_period - 1));
+            
+            uint8_t dim_high = ((scl & 0x07) << 5) | ((new_value >> 8) & 0x1F);
+            uint8_t dim_low = new_value & 0xFF;
+            
+            // Update with verification
+            verifyI2CWriteRS(addresses[led], dimh_reg, dim_high, dimh_reg + 1, dim_low);
+        }
+    }
+}
+
+// First, let's add debug flags and I2C address check
+#define LCD_I2C_ADDR 0x20  // Default I2C address for LCD shield
+#define DEBUG_LCD true
 
 void setup() {
-    Wire.begin();
+    // Start Serial first for debugging
     Serial.begin(9600);
+    while (!Serial && millis() < 3000); // Wait for serial to initialize (with timeout)
+    Serial.println(F("Starting initialization..."));
+    
+    // Initialize I2C first
+    Wire.begin();
+    delay(100);  // Longer delay after I2C init
+    
+    // Check if LCD is responding
+    Wire.beginTransmission(LCD_I2C_ADDR);
+    byte error = Wire.endTransmission();
+    
+    if (error == 0) {
+        Serial.println(F("LCD found at 0x20"));
+    } else {
+        Serial.println(F("LCD not found! Error: "));
+        Serial.println(error);
+    }
+    
+    // Initialize LCD with proper parameters
+    Serial.println(F("Initializing LCD..."));
     lcd.begin(16, 2);
+    delay(100);
+    
+    // Set initial backlight state
+    Serial.println(F("Setting backlight..."));
     lcd.setBacklight(WHITE);
+    delay(100);
     
-    if (!rtc.begin()) {
-        if (debug_mode) Serial.println("Couldn't find RTC");
+    // Test LCD functionality
+    Serial.println(F("Writing test message..."));
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("LCD Test"));
+    delay(1000);
+    
+    // Continue with rest of initialization only if LCD is working
+    if (error == 0) {
+        Serial.println(F("LCD initialized successfully"));
+        
+        // Initialize temperature sensor
+        if (!tempsensor.begin(0x48)) {
+            Serial.println(F("Couldn't find PCT2075!"));
+        }
+        
+        // Check if RTC is responding at correct address
+        Wire.beginTransmission(DS3231_ADDRESS);
+        if (Wire.endTransmission() == 0) {
+            Serial.println(F("RTC found at 0x68"));
+            if (!rtc.begin()) {
+                Serial.println(F("RTC initialization failed!"));
+                lcd.setBacklight(RED);
+                lcd.clear();
+                lcd.print(F("RTC Init Failed"));
+            }
+        } else {
+            Serial.println(F("RTC not found at 0x68!"));
+            lcd.setBacklight(RED);
+            lcd.clear();
+            lcd.print(F("RTC Not Found"));
+        }
+        
+        // Initialize system manager AFTER all devices are initialized
+        if (!systemManager.initialize()) {
+            lcd.setBacklight(RED);
+            lcd.clear();
+            lcd.print(F("Init Failed!"));
+            Serial.println(F("System init failed"));
+            while(1) {
+                delay(1000);
+            }
+        }
+    } else {
+        Serial.println(F("LCD initialization failed!"));
+        while(1) {
+            delay(1000);  // Halt if LCD fails
+        }
     }
-    
-    if (rtc.lostPower()) {
-        // RTC lost power, set to compile time
-        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    }
-    
-    // Initialize all LED modules
-    const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
-    for(uint8_t i = 0; i < 4; i++) {
-        lt3966_i2c_write(addresses[i], GLBCFG, 0x0F);  // All channels off initially
-    }
-    
-    initializeLogging();
-    loadSettings();
 }
 
 // Verification function
@@ -232,11 +678,13 @@ void verifyConfiguration(uint8_t address) {
 }
 
 void loop() {
+    static unsigned long lastUpdate = 0;
     static unsigned long lastButtonCheck = 0;
     const unsigned long buttonDelay = 150;  // Debounce delay
     
     uint8_t buttons = lcd.readButtons();
-    
+
+    // Handle button inputs with debounce
     if (buttons && (millis() - lastButtonCheck > buttonDelay)) {
         lastButtonCheck = millis();
         
@@ -254,10 +702,16 @@ void loop() {
                 handleStatusSettings(buttons);
                 break;
         }
+        
+        // Reset display update timer after button press
+        lastUpdate = millis();
     }
-    
-    // Update display if needed
-    updateDisplay();
+
+    // Only update display if no button was pressed recently
+    if (millis() - lastUpdate > 1000) {
+        updateDisplay();  // Use the existing updateDisplay function
+        lastUpdate = millis();
+    }
 }
 
 // Calculate PWM values based on percentage
@@ -503,14 +957,18 @@ void handleStatusSettings(uint8_t buttons) {
 
 // Add before loop()
 void handleMainMenu(uint8_t buttons) {
-    const char* menu_items[] = {"Quick Controls", "Individual Ctrl", "Status/Settings"};
-    const uint8_t menu_size = 3;
+    static const char* menu_items[] = {
+        "Quick Controls",
+        "Indiv. Control",
+        "Status/Settings"
+    };
+    static const uint8_t num_items = 3;
     
     if (buttons & BUTTON_UP) {
         if (menuPosition > 0) menuPosition--;
     }
     if (buttons & BUTTON_DOWN) {
-        if (menuPosition < menu_size - 1) menuPosition++;
+        if (menuPosition < num_items - 1) menuPosition++;
     }
     if (buttons & BUTTON_SELECT) {
         switch(menuPosition) {
@@ -518,72 +976,86 @@ void handleMainMenu(uint8_t buttons) {
             case 1: currentMenu = INDIVIDUAL_CONTROL; break;
             case 2: currentMenu = STATUS_SETTINGS; break;
         }
-        menuPosition = 0;
+        menuPosition = 0;  // Reset position for submenu
         return;
     }
     
+    // Update display
     lcd.clear();
-    lcd.print("> " + String(menu_items[menuPosition]));
-    if (menuPosition < menu_size - 1) {
-        lcd.setCursor(0, 1);
-        lcd.print("  " + String(menu_items[menuPosition + 1]));
-    }
+    lcd.print("=== Main Menu ===");
+    lcd.setCursor(0, 1);
+    lcd.print(">");
+    lcd.print(menu_items[menuPosition]);
 }
 
 void handleQuickControls(uint8_t buttons) {
+    static bool isOn = false;
+    const float DEFAULT_BRIGHTNESS = 10.0;  // Fixed 10% brightness
+    const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
+
     if (buttons & BUTTON_LEFT) {
         currentMenu = MAIN_MENU;
         menuPosition = 0;
         return;
     }
-    
-    if (buttons & BUTTON_UP) {
-        if (quickControlPosition > 0) quickControlPosition--;
-    }
-    if (buttons & BUTTON_DOWN) {
-        if (quickControlPosition < 1) quickControlPosition++;
-    }
-    
+
     if (buttons & BUTTON_SELECT) {
-        const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
-        switch(quickControlPosition) {
-            case 0: // All On/Off
-                for(uint8_t i = 0; i < 4; i++) {
-                    lt3966_i2c_write(addresses[i], GLBCFG, (buttons & BUTTON_RIGHT) ? 0x00 : 0x0F);
+        isOn = !isOn;  // Toggle state
+        
+        for(uint8_t i = 0; i < 4; i++) {
+            if(isOn) {
+                // First enable all channels
+                lt3966_i2c_write(addresses[i], GLBCFG, 0x00);  // Enable all channels
+                
+                // Set ADIM registers to maximum (like in original code)
+                lt3966_i2c_write(addresses[i], ADIM1, 0xFF);
+                lt3966_i2c_write(addresses[i], ADIM2, 0xFF);
+                lt3966_i2c_write(addresses[i], ADIM3, 0xFF);
+                lt3966_i2c_write(addresses[i], ADIM4, 0xFF);
+                
+                // Set PWM for each channel using 13-bit resolution (SCL=7)
+                for(uint8_t ch = 0; ch < 4; ch++) {
+                    uint8_t dimh_reg = DIM1H + (ch * 0x10);
+                    uint8_t diml_reg = dimh_reg + 1;
+                    uint8_t scl = 7;  // 13-bit resolution
+                    uint16_t pwm_value = calculatePWM(DEFAULT_BRIGHTNESS, scl);
+                    uint8_t dim_high = ((scl & 0x07) << 5) | ((pwm_value >> 8) & 0x1F);
+                    uint8_t dim_low = pwm_value & 0xFF;
+                    lt3966_i2c_write_rs(addresses[i], dimh_reg, dim_high, diml_reg, dim_low);
                 }
-                break;
-            case 1: // Global Brightness
-                currentBrightness = min(100.0f, currentBrightness + ((buttons & BUTTON_RIGHT) ? 5.0f : -5.0f));
-                for(uint8_t i = 0; i < 4; i++) {
-                    for(uint8_t ch = 0; ch < 4; ch++) {
-                        setPWMDutyCycle(addresses[i], ch, currentBrightness);
-                    }
+                
+                // Set channel configuration
+                for(uint8_t ch = 0; ch < 4; ch++) {
+                    uint8_t cfg_reg = CFG1 + (ch * 0x10);
+                    lt3966_i2c_write(addresses[i], cfg_reg, 0x03);  // Enable DIMEN and ICTRL
                 }
-                break;
+            } else {
+                // Turn off by disabling all channels
+                lt3966_i2c_write(addresses[i], GLBCFG, 0x0F);
+            }
         }
     }
     
+    // Update display
     lcd.clear();
-    lcd.print(quickControlPosition == 0 ? "> All On/Off" : "> Global Bright");
+    lcd.print(F("Quick Control:"));
     lcd.setCursor(0, 1);
-    lcd.print(quickControlPosition == 0 ? "  Global Bright" : String(currentBrightness, 1) + "%");
+    lcd.print(F("LEDs: "));
+    lcd.print(isOn ? F("ON") : F("OFF"));
 }
-
 void updateDisplay() {
-    if (millis() - lastDisplayUpdate < DISPLAY_REFRESH_RATE) {
-        return;  // Skip if not enough time has passed
-    }
-    lastDisplayUpdate = millis();
-    
-    // Update based on current menu state
     switch(currentMenu) {
         case MAIN_MENU:
-            // Main menu is already handled in handleMainMenu
+            handleMainMenu(0);  // Update display without button press
             break;
         case QUICK_CONTROLS:
+            // Display current quick controls state
+            break;
         case INDIVIDUAL_CONTROL:
+            // Display current individual control state
+            break;
         case STATUS_SETTINGS:
-            // These will be implemented in Phase 2
+            // Display current status/settings state
             break;
     }
 }
@@ -923,3 +1395,192 @@ private:
         return 0;  // Implement actual search
     }
 };
+
+// Add these key safety functions
+bool writeWithVerification(uint16_t addr, const void* data, size_t len) {
+    const uint8_t MAX_RETRIES = 3;
+    for (uint8_t retry = 0; retry < MAX_RETRIES; retry++) {
+        EEPROM.put(addr, data);
+        // Verify write
+        bool verified = true;
+        for (size_t i = 0; i < len; i++) {
+            if (EEPROM.read(addr + i) != ((const uint8_t*)data)[i]) {
+                verified = false;
+                break;
+            }
+        }
+        if (verified) return true;
+    }
+    return false;
+}
+
+// Add after the existing EEPROMManager class
+
+
+// Implementation of SafeEEPROMManager member functions
+void SafeEEPROMManager::handleInterruptedOperation() {
+    if (operationInProgress) {
+        clearRecoveryPoint();
+    }
+}
+
+void SafeEEPROMManager::clearRecoveryPoint() {
+    EEPROM.write(RECOVERY_ADDR, 0);
+    operationInProgress = false;
+}
+
+uint32_t SafeEEPROMManager::calculateCRC32(const void* data, size_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    const uint8_t* ptr = (const uint8_t*)data;
+    while (len--) {
+        crc ^= *ptr++;
+        for (uint8_t i = 0; i < 8; i++) {
+            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
+        }
+    }
+    return ~crc;
+}
+
+bool SafeEEPROMManager::verifyWrite(uint16_t addr, const void* data, size_t len) {
+    const uint8_t MAX_RETRIES = 3;
+    const uint8_t* src = (const uint8_t*)data;
+    
+    for (uint8_t retry = 0; retry < MAX_RETRIES; retry++) {
+        for (size_t i = 0; i < len; i++) {
+            EEPROM.write(addr + i, src[i]);
+        }
+        
+        bool verified = true;
+        for (size_t i = 0; i < len; i++) {
+            if (EEPROM.read(addr + i) != src[i]) {
+                verified = false;
+                break;
+            }
+        }
+        
+        if (verified) return true;
+        delay(5);
+    }
+    return false;
+}
+
+bool SafeEEPROMManager::writeWithVerification(uint16_t addr, const void* data, size_t len) {
+    if (!this->verifyWrite(addr, data, len)) {
+        return false;
+    }
+    return true;
+}
+
+void SafeEEPROMManager::compactStorage() {
+    // Move valid blocks to eliminate gaps
+}
+
+void SafeEEPROMManager::handleWearLimitReached() {
+    // Handle when a block reaches wear limit
+}
+
+uint16_t SafeEEPROMManager::findLatestLog(uint8_t led, uint8_t channel) {
+    // Find the most recent log entry for given LED and channel
+    return 0;
+}
+
+uint16_t SafeEEPROMManager::findNextBlock() {
+    // Find next available block for writing
+    return DATA_START;
+}
+
+class DataLogger {
+private:
+    static const uint16_t LOG_START_ADDR = 512;  // Use second half of EEPROM
+    static const uint8_t LOGS_PER_CHANNEL = 4;   // Store last 4 entries per channel
+
+    uint16_t getLogAddress(uint8_t led, uint8_t channel) {
+        return LOG_START_ADDR + 
+               (led * 4 + channel) * sizeof(RuntimeLog) * LOGS_PER_CHANNEL;
+    }
+
+public:
+    void exportData() {
+        Serial.println(F("Start Time,End Time,LED,Channel,Current(mA),PWM,Temp(C)"));
+        
+        for(uint8_t led = 0; led < 4; led++) {
+            for(uint8_t ch = 0; ch < 4; ch++) {
+                RuntimeLog log;
+                uint16_t addr = getLogAddress(led, ch);
+                EEPROM.get(addr, log);
+                
+                // Print in CSV format
+                printDateTime(log.startTime);
+                Serial.print(',');
+                printDateTime(log.endTime);
+                Serial.print(',');
+                Serial.print(log.led + 1);
+                Serial.print(',');
+                Serial.print(log.channel + 1);
+                Serial.print(',');
+                Serial.print(log.current_mA);
+                Serial.print(',');
+                Serial.print(log.pwmResolution);
+                Serial.print(',');
+                Serial.println(log.temperature);
+            }
+        }
+    }
+
+private:
+    void printDateTime(const DateTime& dt) {
+        Serial.print(dt.year(), DEC);
+        Serial.print('/');
+        Serial.print(dt.month(), DEC);
+        Serial.print('/');
+        Serial.print(dt.day(), DEC);
+        Serial.print(' ');
+        Serial.print(dt.hour(), DEC);
+        Serial.print(':');
+        Serial.print(dt.minute(), DEC);
+        Serial.print(':');
+        Serial.print(dt.second(), DEC);
+    }
+};
+
+
+void SystemManager::handleTemperature() {
+    float temp = tempsensor.getTemperature();
+    if (temp > 85.0) {
+        errorTracker.logError(ErrorInfo::ErrorType::TEMP_WARNING, 0);
+    }
+}
+
+void SystemManager::checkErrors() {
+    if (errorTracker.hasErrors()) {
+        lcd.setBacklight(RED);
+    } else {
+        lcd.setBacklight(WHITE);
+    }
+}
+
+void SystemManager::updateDisplay() {
+    // Update LCD display with current status
+    lcd.clear();
+    lcd.print("Temp: ");
+    lcd.print(tempsensor.getTemperature());
+    lcd.print("C");
+}
+
+void ErrorTracker::logError(ErrorInfo::ErrorType type, uint16_t address) {
+    if (errorCount < MAX_ERRORS) {
+        errors[errorCount].type = type;
+        errors[errorCount].address = address;
+        errors[errorCount].timestamp = millis();
+        errorCount++;
+    }
+}
+
+void ErrorTracker::clearErrors() {
+    errorCount = 0;
+}
+
+bool ErrorTracker::hasErrors() const {
+    return errorCount > 0;
+}
+
