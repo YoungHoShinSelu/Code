@@ -7,7 +7,7 @@
 
 // New LED module addresses - ADD THESE BEFORE setup()
 #define LT3966_ADD1  0b1111   // ADD1: VCC, ADD2: VCC (0x5F)
-#define LT3966_ADD2  0b0111   // ADD1: VCC, ADD2: FLOAT (0x57)  
+#define LT3966_ADD2  0b0011   // ADD1: FLOAT, ADD2: GND (0x53)  
 #define LT3966_ADD3  0b0001   // ADD1: FLOAT, ADD2: GND (0x51)
 #define LT3966_ADD4  0b0101   // ADD1: FLOAT, ADD2: FLOAT (0x55)
 
@@ -90,10 +90,10 @@ void setup()
         lt3966_i2c_write(addresses[i], CFG4, cfg_reg);
 
         // Pre-set Analog Dimming Registers to maximum
-        lt3966_i2c_write(addresses[i], ADIM1, 0xFF); // Set Analog Dimming to 100%
-        lt3966_i2c_write(addresses[i], ADIM2, 0xFF);
-        lt3966_i2c_write(addresses[i], ADIM3, 0xFF);
-        lt3966_i2c_write(addresses[i], ADIM4, 0xFF);
+        lt3966_i2c_write(addresses[i], ADIM1, 0x0F); // Set Analog Dimming to 100%
+        lt3966_i2c_write(addresses[i], ADIM2, 0x0F);
+        lt3966_i2c_write(addresses[i], ADIM3, 0x0F);
+        lt3966_i2c_write(addresses[i], ADIM4, 0x0F);
 
         // Initialize PWM settings
 		// PWM Configuration Notes:
