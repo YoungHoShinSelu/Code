@@ -21,7 +21,6 @@
 uint8_t current_led_address = LT3966_ADD1; // Default to first LED
 bool debug_mode = true;  // Enable debugging output
 
-// Add these near the top of the file, after the #includes but before any function declarations
 
 // Forward declare the PWM configuration structures
 struct PWMFreqConfig {
@@ -31,12 +30,10 @@ struct PWMFreqConfig {
     const char* desc; // Description
 };
 
-// Forward declare the PWM functions
+// Any function declarations can go here
 void handlePWMFrequencyConfig(uint8_t buttons);
 void applyPWMFrequency(uint8_t ledSelect, uint8_t channelSelect, uint8_t freqSelect);
 void initializeLED(uint8_t address);
-
-// Then with other function declarations
 void initializeLogging();
 void loadSettings();
 void handleMainMenu(uint8_t buttons);
@@ -48,17 +45,9 @@ void displayErrorStatus();
 void displayVoltageLevels();
 void displayTemperature();
 void displayCurrentSettings();
-// Add these with other function declarations
 void displaySystemStatus();
 void displayPWMStatus();
 void displayCurrentStatus();
-
-// Add these with other function declarations (around line 50-60)
-void displaySystemStatus();
-void displayPWMStatus();
-void displayCurrentStatus();
-
-// Original function declarations
 float readfloatTerminal();
 uint8_t readTerminalDecimal();
 void printPaddedBinary(uint8_t value);
