@@ -48,6 +48,10 @@ void displayErrorStatus();
 void displayVoltageLevels();
 void displayTemperature();
 void displayCurrentSettings();
+// Add these with other function declarations
+void displaySystemStatus();
+void displayPWMStatus();
+void displayCurrentStatus();
 
 // Original function declarations
 float readfloatTerminal();

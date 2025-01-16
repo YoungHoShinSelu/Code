@@ -1,0 +1,160 @@
+# Cursor Rules for LED Control System Enhancement
+
+You are an expert embedded systems developer specializing in Arduino development with extensive experience in real-time systems and sensor integration.
+
+## Code Style and Structure
+- Write clean, memory-efficient Arduino/C++ code
+- Follow Arduino coding conventions
+- Use descriptive variable names (e.g., 'tempSensor', 'rtcModule')
+- Implement clear function hierarchy
+- Keep functions focused and minimal
+- Use consistent indentation and formatting
+
+## Memory Management
+- Minimize SRAM usage through efficient data structures
+- Use PROGMEM for constant strings
+- Implement efficient EEPROM wear leveling
+- Optimize variable types for memory usage
+- Use static allocation where possible
+- Minimize dynamic memory allocation
+
+## Time Management
+- Use RTClib effectively for time operations
+- Implement efficient time tracking
+- Use appropriate data types for time storage
+- Handle time overflow conditions
+- Validate time synchronization
+
+## Temperature Monitoring
+- Implement efficient temperature sampling
+- Use ring buffer for temperature history
+- Optimize average calculation
+- Handle sensor errors gracefully
+- Implement threshold monitoring
+
+## Code Organization
+- Separate concerns into logical files
+- Use clear module boundaries
+- Implement clean interfaces between components
+- Follow Arduino project structure
+- Maintain clear dependency hierarchy
+
+## Variable Naming
+- Use camelCase for variables and functions
+- Use UPPER_CASE for constants
+- Prefix class members with 'm_'
+- Use clear, descriptive names
+- Avoid abbreviations unless standard
+
+## Arduino Specifics
+- Use standard Arduino functions appropriately
+- Handle hardware interrupts correctly
+- Implement efficient loop() function
+- Optimize setup() initialization
+- Use appropriate pin modes
+
+## Error Handling
+- Implement comprehensive error checking
+- Use clear error codes
+- Provide user feedback
+- Handle hardware failures gracefully
+- Implement recovery mechanisms
+
+## Constants and Magic Numbers
+- Define all constants clearly
+- Use enums for state machines
+- Document constant meanings
+- Use appropriate data types
+- Group related constants
+
+## Documentation
+- Document all functions clearly
+- Explain complex algorithms
+- Document hardware connections
+- Maintain change log
+- Include usage examples
+
+## Testing
+- Implement debug output options
+- Add status checking code
+- Include self-test functions
+- Validate sensor readings
+- Monitor memory usage
+
+## EEPROM Usage
+- Implement wear leveling
+- Validate stored data
+- Handle corruption gracefully
+- Optimize write operations
+- Implement data recovery
+
+## Timing and Delays
+- Use non-blocking delays
+- Handle timer overflows
+- Implement efficient scheduling
+- Monitor timing accuracy
+- Handle time synchronization
+
+## UI/Menu System
+- Implement clear navigation
+- Provide user feedback
+- Handle button debouncing
+- Update display efficiently
+- Maintain responsive interface
+
+## Status/Settings Implementation
+- Preserve existing menu structure
+- Implement clean state transitions
+- Optimize display updates
+- Handle user input efficiently
+- Maintain system responsiveness
+
+## Preservation Rules
+DO NOT MODIFY:
+- LED driver address definitions
+- Existing global variables
+- Hardware configuration constants
+- External library interfaces
+- Existing pin assignments
+
+## Key Functions to Implement
+1. Time Sync:
+```cpp
+bool syncRTCWithPC();
+void handleTimeSync();
+bool isUSBConnected();
+void displayTimeError();
+```
+
+2. Experiment Timer:
+```cpp
+void startExperiment();
+void updateExperimentTime();
+void displayExperimentStatus();
+void saveExperimentData();
+```
+
+3. Status View:
+```cpp
+void displayLEDStatus();
+void showChannelDetails();
+void updateRunningTime();
+void displayStatusMenu();
+```
+
+4. Temperature Monitor:
+```cpp
+void updateTemperature();
+void calculateTempStats();
+void displayTempStatus();
+void handleTempWarning();
+```
+
+## Critical Sections
+- Mark critical sections with comments
+- Use appropriate protection mechanisms
+- Document timing requirements
+- Handle interrupt conflicts
+- Ensure data consistency
+
+Follow these guidelines for all code generation and modification tasks.
