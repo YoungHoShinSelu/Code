@@ -45,7 +45,6 @@ void displayErrorStatus();
 void displayVoltageLevels();
 void displayTemperature();
 void displayCurrentSettings();
-void displaySystemStatus();
 void displayPWMStatus();
 void displayCurrentStatus();
 float readfloatTerminal();
@@ -291,12 +290,7 @@ private:
 // Global variables and constants (add with other globals)
 Adafruit_PCT2075 tempsensor;
 static const uint16_t TEMP_LOG_ADDR = 960;
-static const float TEMP_WARNING_THRESHOLD = 40.0;  // Move this here too
-
-// Remove these declarations from their current locations:
-// #define TEMP_WARNING_THRESHOLD 40.0  // Remove this
-// static const uint16_t TEMP_LOG_ADDR = 960;  // Remove this
-// Adafruit_PCT2075 tempsensor;  // Remove this
+static const float TEMP_WARNING_THRESHOLD = 60.0;  // Move this here too
 
 // Forward declare all classes
 class SafeEEPROMManager;
@@ -1025,20 +1019,15 @@ void handleIndividualControl(uint8_t buttons) {
 }
 
 void handleStatusSettings(uint8_t buttons) {
-    static uint8_t statusPage = 0;
-    static uint8_t currentLED = 0;
-    const char* status_items[] = {"View Status", "PWM Resolution", "Monitor Current"};
-    const uint8_t status_size = 3;
-    static bool inStatusView = false;
-
+    static bool inPWMView = false;
+    
+    // Handle back button
     if (buttons & BUTTON_LEFT) {
-        if (inStatusView) {
+        if (inPWMView) {
             // Return to status menu
-            inStatusView = false;
+            inPWMView = false;
             lcd.clear();
-            lcd.print(F("> View Status"));
-            lcd.setCursor(0, 1);
-            lcd.print(F("  PWM Resolution"));
+            lcd.print(F("PWM Resolution"));
         } else {
             // Return to main menu
             currentMenu = MAIN_MENU;
@@ -1051,64 +1040,42 @@ void handleStatusSettings(uint8_t buttons) {
         return;
     }
 
-    if (!inStatusView) {
-        // Main status menu navigation
+    // If we just entered the Status/Settings menu, show PWM Resolution directly
+    if (!inPWMView) {
+        // Show PWM Resolution menu
+        lcd.clear();
+        lcd.print(F("PWM Resolution"));
+        
+        if (buttons & BUTTON_SELECT) {
+            inPWMView = true;
+            displayPWMStatus();
+        }
+    } else {
+        // PWM Resolution adjustment
         if (buttons & BUTTON_UP) {
-            if (statusPosition > 0) {
-                statusPosition--;
-                lcd.clear();
-                lcd.print(F("> "));
-                lcd.print(status_items[statusPosition]);
-                if(statusPosition < status_size - 1) {
-                    lcd.setCursor(0, 1);
-                    lcd.print(F("  "));
-                    lcd.print(status_items[statusPosition + 1]);
-                }
+            if (currentPWMResolution < 13) {  // Max 13-bit resolution
+                currentPWMResolution++;
+                displayPWMStatus();
             }
         }
         if (buttons & BUTTON_DOWN) {
-            if (statusPosition < status_size - 1) {
-                statusPosition++;
-                lcd.clear();
-                lcd.print(F("> "));
-                lcd.print(status_items[statusPosition]);
-                if(statusPosition < status_size - 1) {
-                    lcd.setCursor(0, 1);
-                    lcd.print(F("  "));
-                    lcd.print(status_items[statusPosition + 1]);
-                }
-            }
-        }
-        if (buttons & BUTTON_SELECT) {
-            inStatusView = true;
-            statusPage = 0;
-            switch(statusPosition) {
-                case 0: // View Status
-                    displaySystemStatus();
-                    break;
-                case 1: // PWM Resolution
-                    displayPWMStatus();
-                    break;
-                case 2: // Monitor Current
-                    displayCurrentStatus();
-                    break;
-            }
-        }
-    } else {
-        // Status view navigation
-        if (buttons & BUTTON_RIGHT) {
-            switch(statusPosition) {
-                case 0: // System Status Pages
-                    statusPage = (statusPage + 1) % 3;
-                    displaySystemStatus();
-                    break;
-                case 2: // Current Monitor
-                    currentLED = (currentLED + 1) % 4;
-                    displayCurrentStatus();
-                    break;
+            if (currentPWMResolution > 6) {  // Min 6-bit resolution
+                currentPWMResolution--;
+                displayPWMStatus();
             }
         }
     }
+}
+
+void displayPWMStatus() {
+    lcd.clear();
+    lcd.print(F("PWM Settings"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Res:"));
+    lcd.print(currentPWMResolution);
+    lcd.print(F("-bit "));
+    lcd.print(PWM_CONFIGS[currentPWMResolution-6].freq);
+    lcd.print(F("Hz"));
 }
 
 // New status display functions
@@ -1179,17 +1146,6 @@ void displaySystemStatus() {
     }
 }
 
-void displayPWMStatus() {
-    lcd.clear();
-    lcd.print(F("PWM Settings"));
-    lcd.setCursor(0, 1);
-    lcd.print(F("Res:"));
-    lcd.print(currentPWMResolution);
-    lcd.print(F("-bit "));
-    lcd.print(PWM_CONFIGS[5].freq);
-    lcd.print(F("Hz"));
-}
-
 void displayCurrentStatus() {
     const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
     lcd.clear();
@@ -1250,11 +1206,9 @@ void handleMainMenu(uint8_t buttons) {
                 break;
             case 2: 
                 currentMenu = STATUS_SETTINGS;
-                // Immediately show Status menu
+                // Immediately show PWM Resolution menu
                 lcd.clear();
-                lcd.print(F("> View Status"));
-                lcd.setCursor(0, 1);
-                lcd.print(F("  PWM Resolution"));
+                lcd.print(F("PWM Resolution"));
                 break;
         }
         menuPosition = 0;  // Reset position for submenu
@@ -1263,11 +1217,11 @@ void handleMainMenu(uint8_t buttons) {
     
     // Update main menu display
     lcd.clear();
-    lcd.print(F("=== Main Menu ==="));  // Added F() macro
+    lcd.print(F("=== Main Menu ==="));
     lcd.setCursor(0, 1);
-    lcd.print(F(">"));  // Added F() macro
+    lcd.print(F(">"));
     lcd.print(menu_items[menuPosition]);
-}  // Added missing closing brace
+}
 
 void handleQuickControls(uint8_t buttons) {
     static bool isOn = false;
