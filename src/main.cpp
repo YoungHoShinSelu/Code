@@ -53,6 +53,11 @@ void displaySystemStatus();
 void displayPWMStatus();
 void displayCurrentStatus();
 
+// Add these with other function declarations (around line 50-60)
+void displaySystemStatus();
+void displayPWMStatus();
+void displayCurrentStatus();
+
 // Original function declarations
 float readfloatTerminal();
 uint8_t readTerminalDecimal();
