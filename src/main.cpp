@@ -9,7 +9,6 @@
 #include "RTClib.h"
 #include <util/crc16.h>  // For CRC calculation
 #include <Adafruit_PCT2075.h>
-#include <Adafruit_PCT2075.h>
 
 // New LED module addresses - ADD THESE BEFORE setup()
 #define LT3966_ADD1  0b1111   // ADD1: VCC, ADD2: VCC (0x5F)
@@ -62,7 +61,7 @@ uint16_t calculatePWM(float duty_cycle, uint8_t scl);
 bool verifyI2CWriteRS(uint8_t address, uint8_t reg1, uint8_t value1, uint8_t reg2, uint8_t value2);
 bool verifyI2CWrite(uint8_t address, uint8_t reg, uint8_t value);
 void handleStatusMenu(uint8_t buttons);
-void displayLEDStateScreen(uint8_t currentLED);  // Add this line
+void displayLEDStateScreen(uint8_t currentLED, uint8_t buttons);  // Add this line
 void displayTemperatureScreen();
 void displayElapsedTimeScreen();
 void toggleExperiment(bool start);
@@ -1004,10 +1003,9 @@ void handleIndividualControl(uint8_t buttons) {
             // Return to LED selection
             inChannelMode = false;
             lcd.clear();
-            lcd.print(F("Select LED:"));
-            lcd.setCursor(0, 1);
-            lcd.print(F("LED "));
+            lcd.print(F(">LED "));
             lcd.print(selectedLED + 1);
+            displayAvailableChannels(selectedLED);
         } else {
             // Return to main menu
             currentMenu = MAIN_MENU;
@@ -1025,18 +1023,14 @@ void handleIndividualControl(uint8_t buttons) {
         if (buttons & BUTTON_UP) {
             if (selectedLED > 0) selectedLED--;
             lcd.clear();
-            lcd.print(F("Select LED:"));
-            lcd.setCursor(0, 1);
-            lcd.print(F("LED "));
+            lcd.print(F(">LED "));
             lcd.print(selectedLED + 1);
             displayAvailableChannels(selectedLED);
         }
         if (buttons & BUTTON_DOWN) {
             if (selectedLED < 3) selectedLED++;
             lcd.clear();
-            lcd.print(F("Select LED:"));
-            lcd.setCursor(0, 1);
-            lcd.print(F("LED "));
+            lcd.print(F(">LED "));
             lcd.print(selectedLED + 1);
             displayAvailableChannels(selectedLED);
         }
@@ -2205,20 +2199,45 @@ struct TemperatureStats {
     float lastPCBTemp;
 } tempStats;
 
-void displayLEDStateScreen(uint8_t currentLED) {
+void displayLEDStateScreen(uint8_t currentLED, uint8_t buttons) {
+    static uint8_t selectedLED = 0;  // Track which LED is selected
+    
+    // Handle navigation if buttons are pressed
+    if (buttons & BUTTON_UP) {
+        if (selectedLED > 0) selectedLED--;
+    }
+    if (buttons & BUTTON_DOWN) {
+        if (selectedLED < 3) selectedLED++;
+    }
+    
+    // Display current LED and its channel values
     lcd.clear();
     lcd.print(F("LED"));
-    lcd.print(currentLED + 1);
+    lcd.print(selectedLED + 1);
     lcd.print(F(" Ch:"));
     
     // Display channel percentages on second line
     lcd.setCursor(0, 1);
-    for (uint8_t ch = 0; ch < 4; ch++) {
-        if (isChannelAvailable(currentLED, ch)) {
-            lcd.print(getChannelName(ch)[0]);
-            lcd.print(channelBrightness[currentLED][ch], 0);
-            lcd.print(F(" "));
-        }
+    
+    // WHITE (W)
+    lcd.print(F("W"));
+    lcd.print((int)channelBrightness[selectedLED][0]);
+    lcd.print(F(" "));
+    
+    // BLUE (B)
+    lcd.print(F("B"));
+    lcd.print((int)channelBrightness[selectedLED][1]);
+    lcd.print(F(" "));
+    
+    // GREEN (G)
+    lcd.print(F("G"));
+    lcd.print((int)channelBrightness[selectedLED][2]);
+    lcd.print(F(" "));
+    
+    // RED (R) - Only show if available
+    if (selectedLED != 1 && selectedLED != 3) {  // Not LED2 or LED4
+        lcd.print(F("R"));
+        lcd.print((int)channelBrightness[selectedLED][3]);
     }
 }
 
@@ -2330,20 +2349,32 @@ float calculateTemperatureAverage() {
 
 void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
     const uint8_t NUM_ITEMS = 5;  // Total number of menu items
-    static uint8_t currentLED = 0;  // For LED status display
     static bool showContent = false;  // Flag to track if we're showing content
+    static bool isFirstEntry = true;  // Track if this is first entry into menu
     
-    // Handle back button to exit content view
-    if (buttons & BUTTON_LEFT) {
+    // Reset state when first entering the menu
+    if (isFirstEntry) {
         showContent = false;
-        lcd.clear();
+        displayMenuItem = 0;
+        isFirstEntry = false;
     }
     
-    // If we're showing content and not pressing back, maintain the current view
+    // Handle back button
+    if (buttons & BUTTON_LEFT) {
+        if (showContent) {
+            showContent = false;  // Return to menu navigation
+            isFirstEntry = false; // Ensure we stay in menu mode
+        } else {
+            isFirstEntry = true;  // Reset for next entry
+            return;  // Return to parent menu
+        }
+    }
+    
+    // If we're showing content, display the appropriate screen
     if (showContent) {
         switch(displayMenuItem) {
             case 0:  // LED States
-                displayLEDStateScreen(currentLED);
+                displayLEDStateScreen(0, buttons);
                 break;
             case 1:  // Elapsed Time
                 displayElapsedTimeScreen();
@@ -2375,29 +2406,34 @@ void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
                 lcd.print(F("Stop Experiment"));
                 lcd.setCursor(0, 1);
                 lcd.print(experimentState.isRunning ? F("Running") : F("Stopped"));
+                if (buttons & BUTTON_SELECT) {
+                    toggleExperiment(false);
+                    lcd.clear();
+                    lcd.print(F("Experiment"));
+                    lcd.setCursor(0, 1);
+                    lcd.print(F("Stopped!"));
+                    delay(1000);
+                    showContent = false;
+                }
                 break;
         }
         return;
     }
     
-    // Handle navigation when not showing content
+    // Handle menu navigation
     if (buttons & BUTTON_UP) {
         if (displayMenuItem > 0) displayMenuItem--;
     }
     if (buttons & BUTTON_DOWN) {
         if (displayMenuItem < NUM_ITEMS - 1) displayMenuItem++;
     }
-    
-    // Handle select button to show content
     if (buttons & BUTTON_SELECT) {
         showContent = true;
         return;
     }
     
-    // Display menu items with cursor
+    // Always show menu items when not showing content
     lcd.clear();
-    
-    // Calculate which two items to show based on current position
     uint8_t firstItem = (displayMenuItem / 2) * 2;
     
     // First line
