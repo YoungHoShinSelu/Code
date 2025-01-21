@@ -9,17 +9,24 @@
 #include "RTClib.h"
 #include <util/crc16.h>  // For CRC calculation
 #include <Adafruit_PCT2075.h>
-
+#include <Adafruit_PCT2075.h>
 
 // New LED module addresses - ADD THESE BEFORE setup()
 #define LT3966_ADD1  0b1111   // ADD1: VCC, ADD2: VCC (0x5F)
-#define LT3966_ADD2  0b0111   // ADD1: VCC, ADD2: FLOAT (0x57)  **LSU module address ADD1: Flaot, ADD2: GND (0x53;0011)
+#define LT3966_ADD2  0b0011   // ADD1: VCC, ADD2: FLOAT (0x57)  **LSU module address ADD1: Flaot, ADD2: GND (0x53;0011)
 #define LT3966_ADD3  0b0001   // ADD1: FLOAT, ADD2: GND (0x51)
 #define LT3966_ADD4  0b0101   // ADD1: FLOAT, ADD2: FLOAT (0x55)
 
 // Add global variable for current LED
 uint8_t current_led_address = LT3966_ADD1; // Default to first LED
 bool debug_mode = true;  // Enable debugging output
+
+// Add experiment state tracking
+struct ExperimentState {
+    bool isRunning;
+    unsigned long startTime;
+    unsigned long elapsedSeconds;
+} experimentState;
 
 
 // Forward declare the PWM configuration structures
@@ -54,6 +61,37 @@ void verifyConfiguration(uint8_t address);
 uint16_t calculatePWM(float duty_cycle, uint8_t scl);
 bool verifyI2CWriteRS(uint8_t address, uint8_t reg1, uint8_t value1, uint8_t reg2, uint8_t value2);
 bool verifyI2CWrite(uint8_t address, uint8_t reg, uint8_t value);
+void handleStatusMenu(uint8_t buttons);
+void displayLEDStateScreen(uint8_t currentLED);  // Add this line
+void displayTemperatureScreen();
+void displayElapsedTimeScreen();
+void toggleExperiment(bool start);
+void updateTemperatureStats();
+void formatElapsedTime(char* buffer, unsigned long seconds);
+void storeTemperatureReading();
+float calculateTemperatureAverage();
+void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem);  // New declaration
+void handlePWMSettings(uint8_t buttons);
+char daysOfTheWeek[7][4] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};  // Using 3-letter abbreviations to save space
+
+// New function declarations for Individual Control Enhancement
+bool isChannelAvailable(uint8_t led, uint8_t channel);
+void displayAvailableChannels(uint8_t led);
+const char* getChannelName(uint8_t channel);
+void updateChannelDisplay(uint8_t led, uint8_t channel);
+uint8_t findNextAvailableChannel(uint8_t led, uint8_t currentChannel, bool forward);
+
+// Menu navigation functions
+void handleMainMenuNavigation(uint8_t buttons);
+void handleQuickControlsNavigation(uint8_t buttons);
+void handleIndividualControlNavigation(uint8_t buttons);
+void handleStatusSettingsNavigation(uint8_t buttons);
+
+// Display update functions (empty shells for now)
+void displayMainMenu();
+void displayQuickControls();
+void displayIndividualControl();
+void displayStatusSettings();
 
 // 1. Improved Serial Input Handling
 #define SERIAL_TIMEOUT 10000  // 10 second timeout
@@ -146,6 +184,25 @@ enum MenuState {
     QUICK_CONTROLS,
     INDIVIDUAL_CONTROL,
     STATUS_SETTINGS
+};
+
+enum IndividualControlState {
+    LED_SELECT,
+    CHANNEL_SELECT,
+    EXPERIMENT_CONTROL
+};
+
+enum StatusDisplayState {
+    LED_STATUS,
+    ELAPSED_TIME,
+    TEMPERATURE_DATA,
+    STOP_EXPERIMENT
+};
+
+enum StatusMenuState {
+    STATUS_SUBMENU_SELECT,  // Choosing between Status Display and PWM Settings
+    STATUS_DISPLAY,         // In Status Display sub-menu
+    PWM_SETTINGS           // In PWM Settings sub-menu
 };
 
 // Global variables
@@ -285,7 +342,7 @@ private:
 };
 
 // Add these declarations right after the includes, before any functions
-#include <Adafruit_PCT2075.h>
+
 
 // Global variables and constants (add with other globals)
 Adafruit_PCT2075 tempsensor;
@@ -579,7 +636,7 @@ void setup() {
     byte error = Wire.endTransmission();
     
     if (error == 0) {
-        Serial.println(F("LCD found at 0x20"));
+        Serial.println(F("LCD foundvoid displayLEDStateScreen(uint8_t currentLED); at 0x20"));
     } else {
         Serial.println(F("LCD not found! Error: "));
         Serial.println(error);
@@ -714,6 +771,15 @@ void verifyConfiguration(uint8_t address) {
         }
     }
 }
+
+// Add new array declaration
+static float channelBrightness[4][4] = {{0}};  // [LED][channel] brightness values
+
+// Add new function declarations
+void updateLEDStateDisplay();
+void displayLEDChannelStatus(uint8_t led, uint8_t channel, float brightness);
+void formatChannelDisplay(char* buffer, uint8_t led, uint8_t channel);
+bool isChannelActive(uint8_t led, uint8_t channel);
 
 void loop() {
     static unsigned long lastUpdate = 0;
@@ -860,6 +926,69 @@ void configureChannel(uint8_t address, uint8_t channel, bool inPhase) {
     lt3966_i2c_write(address, cfg_reg, cfg_value);
 }
 
+// Helper functions for Individual Control Enhancement
+bool isChannelAvailable(uint8_t led, uint8_t channel) {
+    // LED2 and LED4 (index 1 and 3) cannot use RED channel (index 3)
+    if ((led == 1 || led == 3) && channel == 3) {
+        return false;
+    }
+    return true;
+}
+
+const char* getChannelName(uint8_t channel) {
+    static const char* channel_names[] = {"WHITE", "BLUE", "GREEN", "RED"};
+    return channel_names[channel];
+}
+
+uint8_t findNextAvailableChannel(uint8_t led, uint8_t currentChannel, bool forward) {
+    uint8_t nextChannel = currentChannel;
+    for(uint8_t i = 0; i < 4; i++) {  // Maximum 4 iterations
+        if(forward) {
+            nextChannel = (nextChannel + 1) % 4;
+        } else {
+            nextChannel = (nextChannel + 3) % 4;  // +3 is same as -1 with wraparound
+        }
+        if(isChannelAvailable(led, nextChannel)) {
+            return nextChannel;
+        }
+    }
+    return currentChannel;  // If no available channel found, stay on current
+}
+
+void updateChannelDisplay(uint8_t led, uint8_t channel, float brightness) {
+    lcd.clear();
+    lcd.print(F("LED"));
+    lcd.print(led + 1);
+    lcd.print(F(" "));
+    lcd.print(getChannelName(channel));
+    if(!isChannelAvailable(led, channel)) {
+        lcd.print(F(" N/A"));
+    }
+    lcd.setCursor(0, 1);
+    lcd.print(F("Bright: "));
+    lcd.print(brightness, 1);
+    lcd.print(F("%"));
+}
+
+void displayAvailableChannels(uint8_t led) {
+    lcd.clear();
+    lcd.print(F("LED"));
+    lcd.print(led + 1);
+    lcd.print(F(" Channels:"));
+    lcd.setCursor(0, 1);
+    
+    String available = "";
+    for(uint8_t ch = 0; ch < 4; ch++) {
+        if(isChannelAvailable(led, ch)) {
+            if(available.length() > 0) {
+                available += ",";
+            }
+            available += getChannelName(ch)[0];  // First letter of channel name
+        }
+    }
+    lcd.print(available);
+}
+
 void handleIndividualControl(uint8_t buttons) {
     static uint8_t selectedLED = 0;      // 0-3 for LED1-4
     static uint8_t selectedChannel = 0;   // 0-3 for WHITE/BLUE/GREEN/RED
@@ -867,7 +996,6 @@ void handleIndividualControl(uint8_t buttons) {
     static float channelBrightness[4][4] = {{0}};  // Store brightness for each LED/channel
     const float MAX_ACTUAL_BRIGHTNESS = 12.0;  // Maximum actual brightness percentage due to hardware limitations
     const float BRIGHTNESS_STEP = 1.0;         // 1% per step
-    const char* channel_names[] = {"WHITE", "BLUE", "GREEN", "RED"};
     const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
 
     // Handle back button
@@ -901,6 +1029,7 @@ void handleIndividualControl(uint8_t buttons) {
             lcd.setCursor(0, 1);
             lcd.print(F("LED "));
             lcd.print(selectedLED + 1);
+            displayAvailableChannels(selectedLED);
         }
         if (buttons & BUTTON_DOWN) {
             if (selectedLED < 3) selectedLED++;
@@ -909,47 +1038,42 @@ void handleIndividualControl(uint8_t buttons) {
             lcd.setCursor(0, 1);
             lcd.print(F("LED "));
             lcd.print(selectedLED + 1);
+            displayAvailableChannels(selectedLED);
         }
         if (buttons & BUTTON_SELECT) {
             inChannelMode = true;
-            selectedChannel = 0;  // Start with WHITE channel
-            // Immediately show channel control
-            lcd.clear();
-            lcd.print(F("LED"));
-            lcd.print(selectedLED + 1);
-            lcd.print(F(" "));
-            lcd.print(channel_names[selectedChannel]);
-            lcd.setCursor(0, 1);
-            lcd.print(F("Bright: "));
-            lcd.print(channelBrightness[selectedLED][selectedChannel], 1);
-            lcd.print(F("%"));
+            // Find first available channel for this LED
+            selectedChannel = 0;
+            while(!isChannelAvailable(selectedLED, selectedChannel) && selectedChannel < 4) {
+                selectedChannel++;
+            }
+            // Update display with channel info
+            updateChannelDisplay(selectedLED, selectedChannel, channelBrightness[selectedLED][selectedChannel]);
         }
     } else {
         // Channel Control Mode
         if (buttons & BUTTON_UP || buttons & BUTTON_DOWN) {
             // Change channel
             if (buttons & BUTTON_UP) {
-                if (selectedChannel > 0) selectedChannel--;
+                selectedChannel = findNextAvailableChannel(selectedLED, selectedChannel, false);
             }
             if (buttons & BUTTON_DOWN) {
-                if (selectedChannel < 3) selectedChannel++;
+                selectedChannel = findNextAvailableChannel(selectedLED, selectedChannel, true);
             }
+            updateChannelDisplay(selectedLED, selectedChannel, channelBrightness[selectedLED][selectedChannel]);
         }
 
         // Increase brightness
         if (buttons & BUTTON_RIGHT) {
-            if (channelBrightness[selectedLED][selectedChannel] < 100.0) {
+            if (isChannelAvailable(selectedLED, selectedChannel) && 
+                channelBrightness[selectedLED][selectedChannel] < 100.0) {
                 channelBrightness[selectedLED][selectedChannel] += BRIGHTNESS_STEP;
                 if (channelBrightness[selectedLED][selectedChannel] > 100.0) {
                     channelBrightness[selectedLED][selectedChannel] = 100.0;
                 }
 
-                // Note: Due to hardware limitations, the actual brightness range is 0% to 12%.
-                // We scale the user interface brightness (0% to 100%) to this range.
-                // In the future, if the hardware supports the full range, remove or adjust this scaling.
                 float actualBrightness = (channelBrightness[selectedLED][selectedChannel] / 100.0f) * MAX_ACTUAL_BRIGHTNESS;
 
-                // Use actualBrightness in calculatePWM
                 uint8_t dimh_reg = DIM1H + (selectedChannel * 0x10);
                 uint8_t diml_reg = dimh_reg + 1;
                 uint8_t scl = 5;  // PWM scaling factor
@@ -958,30 +1082,27 @@ void handleIndividualControl(uint8_t buttons) {
                 uint8_t dim_high = ((scl & 0x07) << 5) | ((pwm_value >> 8) & 0x1F);
                 uint8_t dim_low = pwm_value & 0xFF;
 
-                // Enable channel if brightness > 0
                 if (channelBrightness[selectedLED][selectedChannel] > 0) {
                     lt3966_i2c_write(addresses[selectedLED], GLBCFG, 0x00);
                     lt3966_i2c_write(addresses[selectedLED], ADIM1 + selectedChannel, 0xFF);
                 }
 
                 lt3966_i2c_write_rs(addresses[selectedLED], dimh_reg, dim_high, diml_reg, dim_low);
+                updateChannelDisplay(selectedLED, selectedChannel, channelBrightness[selectedLED][selectedChannel]);
             }
         }
 
         // Decrease brightness
         if (buttons & BUTTON_LEFT) {
-            if (channelBrightness[selectedLED][selectedChannel] > 0.0) {
+            if (isChannelAvailable(selectedLED, selectedChannel) && 
+                channelBrightness[selectedLED][selectedChannel] > 0.0) {
                 channelBrightness[selectedLED][selectedChannel] -= BRIGHTNESS_STEP;
                 if (channelBrightness[selectedLED][selectedChannel] < 0.0) {
                     channelBrightness[selectedLED][selectedChannel] = 0.0;
                 }
 
-                // Note: Due to hardware limitations, the actual brightness range is 0% to 12%.
-                // We scale the user interface brightness (0% to 100%) to this range.
-                // In the future, if the hardware supports the full range, remove or adjust this scaling.
                 float actualBrightness = (channelBrightness[selectedLED][selectedChannel] / 100.0f) * MAX_ACTUAL_BRIGHTNESS;
 
-                // Use actualBrightness in calculatePWM
                 uint8_t dimh_reg = DIM1H + (selectedChannel * 0x10);
                 uint8_t diml_reg = dimh_reg + 1;
                 uint8_t scl = 5;  // PWM scaling factor
@@ -990,80 +1111,92 @@ void handleIndividualControl(uint8_t buttons) {
                 uint8_t dim_high = ((scl & 0x07) << 5) | ((pwm_value >> 8) & 0x1F);
                 uint8_t dim_low = pwm_value & 0xFF;
 
-                // Disable channel if brightness is 0
                 if (channelBrightness[selectedLED][selectedChannel] == 0) {
                     lt3966_i2c_write(addresses[selectedLED], GLBCFG, 0x0F);
                 }
 
                 lt3966_i2c_write_rs(addresses[selectedLED], dimh_reg, dim_high, diml_reg, dim_low);
+                updateChannelDisplay(selectedLED, selectedChannel, channelBrightness[selectedLED][selectedChannel]);
             }
         }
 
         if (buttons & BUTTON_SELECT) {
-            // Turn channel completely off
-            channelBrightness[selectedLED][selectedChannel] = 0;
-            lt3966_i2c_write(addresses[selectedLED], GLBCFG, 0x0F);
+            // Turn channel completely off if it's available
+            if (isChannelAvailable(selectedLED, selectedChannel)) {
+                channelBrightness[selectedLED][selectedChannel] = 0;
+                lt3966_i2c_write(addresses[selectedLED], GLBCFG, 0x0F);
+                updateChannelDisplay(selectedLED, selectedChannel, channelBrightness[selectedLED][selectedChannel]);
+            }
         }
-
-        // Update channel control display
-            lcd.clear();
-            lcd.print(F("LED"));
-            lcd.print(selectedLED + 1);
-            lcd.print(F(" "));
-            lcd.print(channel_names[selectedChannel]);
-            lcd.setCursor(0, 1);
-            lcd.print(F("Bright: "));
-            lcd.print(channelBrightness[selectedLED][selectedChannel], 1);
-            lcd.print(F("%"));
-        }
+    }
 }
 
 void handleStatusSettings(uint8_t buttons) {
-    static bool inPWMView = false;
+    static StatusMenuState menuState = STATUS_SUBMENU_SELECT;
+    static uint8_t subMenuSelection = 0;  // 0 = Status Display, 1 = PWM Settings
+    static uint8_t displayMenuItem = 0;    // For Status Display sub-menu items
     
     // Handle back button
     if (buttons & BUTTON_LEFT) {
-        if (inPWMView) {
-            // Return to status menu
-            inPWMView = false;
-            lcd.clear();
-            lcd.print(F("PWM Resolution"));
-        } else {
-            // Return to main menu
+        if (menuState == STATUS_SUBMENU_SELECT) {
             currentMenu = MAIN_MENU;
-            menuPosition = 2;
+            // Immediately show main menu
             lcd.clear();
             lcd.print(F("=== Main Menu ==="));
             lcd.setCursor(0, 1);
-            lcd.print(F(">Status/Settings"));
+            lcd.print(F(">Status/Settings"));  // Return to where we were
+            return;
+        } else {
+            menuState = STATUS_SUBMENU_SELECT;
+            // Immediately show Status/Settings submenu
+            lcd.clear();
+            lcd.print(subMenuSelection == 0 ? ">" : " ");
+            lcd.print(F("Status Display"));
+            lcd.setCursor(0, 1);
+            lcd.print(subMenuSelection == 1 ? ">" : " ");
+            lcd.print(F("PWM Settings"));
+            return;
         }
-        return;
     }
-
-    // If we just entered the Status/Settings menu, show PWM Resolution directly
-    if (!inPWMView) {
-        // Show PWM Resolution menu
-        lcd.clear();
-        lcd.print(F("PWM Resolution"));
-        
-        if (buttons & BUTTON_SELECT) {
-            inPWMView = true;
-            displayPWMStatus();
-        }
-    } else {
-        // PWM Resolution adjustment
-        if (buttons & BUTTON_UP) {
-            if (currentPWMResolution < 13) {  // Max 13-bit resolution
-                currentPWMResolution++;
-                displayPWMStatus();
+    
+    switch(menuState) {
+        case STATUS_SUBMENU_SELECT:
+            // Handle navigation first
+            if (buttons & BUTTON_UP) {
+                if (subMenuSelection > 0) subMenuSelection--;
             }
-        }
-        if (buttons & BUTTON_DOWN) {
-            if (currentPWMResolution > 6) {  // Min 6-bit resolution
-                currentPWMResolution--;
-                displayPWMStatus();
+            if (buttons & BUTTON_DOWN) {
+                if (subMenuSelection < 1) subMenuSelection++;
             }
-        }
+            
+            // Then update display
+            lcd.clear();
+            lcd.print(subMenuSelection == 0 ? ">" : " ");
+            lcd.print(F("Status Display"));
+            lcd.setCursor(0, 1);
+            lcd.print(subMenuSelection == 1 ? ">" : " ");
+            lcd.print(F("PWM Settings"));
+            
+            if (buttons & BUTTON_SELECT) {
+                menuState = subMenuSelection == 0 ? STATUS_DISPLAY : PWM_SETTINGS;
+                displayMenuItem = 0;  // Reset sub-menu position
+                
+                // Immediately show the selected submenu
+                if (menuState == STATUS_DISPLAY) {
+                    handleStatusDisplay(0, displayMenuItem);  // Pass 0 for buttons to just display
+                } else {
+                    handlePWMSettings(0);  // Pass 0 for buttons to just display
+                }
+            }
+            break;
+            
+        case STATUS_DISPLAY:
+            handleStatusDisplay(buttons, displayMenuItem);
+            break;
+            
+        case PWM_SETTINGS:
+            handlePWMSettings(buttons);
+            break;
     }
 }
 
@@ -1206,9 +1339,11 @@ void handleMainMenu(uint8_t buttons) {
                 break;
             case 2: 
                 currentMenu = STATUS_SETTINGS;
-                // Immediately show PWM Resolution menu
+                // Show Status/Settings submenu options
                 lcd.clear();
-                lcd.print(F("PWM Resolution"));
+                lcd.print(F(">Status Display"));
+                lcd.setCursor(0, 1);
+                lcd.print(F(" PWM Settings"));
                 break;
         }
         menuPosition = 0;  // Reset position for submenu
@@ -1542,7 +1677,7 @@ TimeStamp getCurrentTime() {
 
 String formatTime(TimeStamp time) {
     char buffer[9];
-    sprintf(buffer, "%02d:%02d:%02d", time.hours, time.minutes, time.seconds);
+    sprintf(buffer, "%02d:%02d:%02lu", time.hours, time.minutes, time.seconds);
     return String(buffer);
 }
 
@@ -1919,4 +2054,408 @@ void ErrorTracker::clearErrors() {
 bool ErrorTracker::hasErrors() const {
     return errorCount > 0;
 }
+
+void displayMainMenu() {
+    lcd.clear();
+    lcd.print(F("=== Main Menu ==="));
+    lcd.setCursor(0, 1);
+    lcd.print(F(">"));
+    lcd.print(F("Quick Controls"));
+}
+
+void displayQuickControls() {
+    lcd.clear();
+    lcd.print(F("Quick Controls"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("(Navigation only)"));
+}
+
+void displayIndividualControl() {
+    lcd.clear();
+    lcd.print(F("Individual Control"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("LED Select"));
+}
+
+void displayStatusSettings() {
+    lcd.clear();
+    lcd.print(F("Status/Settings"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Status Display"));
+}
+
+void handleMainMenuNavigation(uint8_t buttons) {
+    static const char* menu_items[] = {
+        "Quick Controls",
+        "Indiv. Control",
+        "Status/Settings"
+    };
+    static uint8_t num_items = 3;
+    static uint8_t menuPosition = 0;
+
+    if (buttons & BUTTON_UP) {
+        if (menuPosition > 0) menuPosition--;
+    }
+    if (buttons & BUTTON_DOWN) {
+        if (menuPosition < num_items - 1) menuPosition++;
+    }
+    if (buttons & BUTTON_SELECT) {
+        switch(menuPosition) {
+            case 0:
+                currentMenu = QUICK_CONTROLS;
+                displayQuickControls();
+                break;
+            case 1:
+                currentMenu = INDIVIDUAL_CONTROL;
+                displayIndividualControl();
+                break;
+            case 2:
+                currentMenu = STATUS_SETTINGS;
+                displayStatusSettings();
+                break;
+        }
+    }
+
+    // Update main menu display
+    lcd.clear();
+    lcd.print(F("=== Main Menu ==="));
+    lcd.setCursor(0, 1);
+    lcd.print(F(">"));
+    lcd.print(menu_items[menuPosition]);
+}
+
+void handleQuickControlsNavigation(uint8_t buttons) {
+    // Navigation logic only
+    displayQuickControls();
+}
+
+void handleIndividualControlNavigation(uint8_t buttons) {
+    // Navigation logic only
+    displayIndividualControl();
+}
+
+void handleStatusSettingsNavigation(uint8_t buttons) {
+    // Navigation logic only
+    displayStatusSettings();
+}
+
+// LED state tracking
+void updateLEDStateDisplay();
+void formatLEDPercentage(char* buffer, float percentage);
+void displayLEDChannelStatus(uint8_t led, uint8_t channel);
+bool isLEDActive(uint8_t led);
+float getLEDChannelPercentage(uint8_t led, uint8_t channel);
+
+// Global variables for LED state tracking
+struct LEDState {
+    float channelPercentages[4];  // Percentages for WHITE, BLUE, GREEN, RED
+    bool isActive;
+};
+LEDState ledStates[4];  // One for each LED
+
+void updateLEDStateDisplay() {
+    lcd.clear();
+    for (uint8_t led = 0; led < 4; led++) {
+        lcd.setCursor((led % 2) * 8, led / 2);
+        lcd.print(F("LED"));
+        lcd.print(led + 1);
+        lcd.print(F(": "));
+        
+        for (uint8_t channel = 0; channel < 4; channel++) {
+            displayLEDChannelStatus(led, channel, channelBrightness[led][channel]);
+        }
+    }
+}
+
+void formatLEDPercentage(char* buffer, float percentage) {
+    if (percentage < 0) {
+        strcpy(buffer, "--");
+    } else {
+        snprintf(buffer, 4, "%2.0f", percentage);
+    }
+}
+
+void displayLEDChannelStatus(uint8_t led, uint8_t channel, float brightness) {
+    char buffer[5];
+    formatChannelDisplay(buffer, led, channel);
+    lcd.print(buffer);
+    lcd.print(F(" "));
+}
+
+void formatChannelDisplay(char* buffer, uint8_t led, uint8_t channel) {
+    if (!isChannelAvailable(led, channel)) {
+        strcpy(buffer, "---");
+    } else {
+        snprintf(buffer, 5, "%c%2.0f", getChannelName(channel)[0], channelBrightness[led][channel]);
+    }
+}
+
+bool isChannelActive(uint8_t led, uint8_t channel) {
+    return isChannelAvailable(led, channel) && channelBrightness[led][channel] > 0;
+}
+
+// Add after other struct definitions
+struct TemperatureStats {
+    float minTemp;
+    float maxTemp;
+    float hourlyReadings[24];
+    uint8_t currentHourIndex;
+    unsigned long lastUpdateTime;
+    float lastAmbientTemp;
+    float lastPCBTemp;
+} tempStats;
+
+void displayLEDStateScreen(uint8_t currentLED) {
+    lcd.clear();
+    lcd.print(F("LED"));
+    lcd.print(currentLED + 1);
+    lcd.print(F(" Ch:"));
+    
+    // Display channel percentages on second line
+    lcd.setCursor(0, 1);
+    for (uint8_t ch = 0; ch < 4; ch++) {
+        if (isChannelAvailable(currentLED, ch)) {
+            lcd.print(getChannelName(ch)[0]);
+            lcd.print(channelBrightness[currentLED][ch], 0);
+            lcd.print(F(" "));
+        }
+    }
+}
+
+void displayTemperatureScreen() {
+    // Update temperature stats if needed
+    if (millis() - tempStats.lastUpdateTime >= 30000) { // Every 30 seconds
+        updateTemperatureStats();
+    }
+    
+    lcd.clear();
+    // First line: Current temperatures
+    lcd.print(F("A:"));
+    lcd.print(tempStats.lastAmbientTemp, 1);
+    lcd.print(F(" P:"));
+    lcd.print(tempStats.lastPCBTemp, 1);
+    
+    // Second line: Min/Max
+    lcd.setCursor(0, 1);
+    lcd.print(F("L"));
+    lcd.print(tempStats.minTemp, 1);
+    lcd.print(F(" H"));
+    lcd.print(tempStats.maxTemp, 1);
+}
+
+void updateTemperatureStats() {
+    float ambientTemp = rtc.getTemperature();
+    float pcbTemp = tempsensor.getTemperature();
+    
+    tempStats.lastAmbientTemp = ambientTemp;
+    tempStats.lastPCBTemp = pcbTemp;
+    
+    // Update min/max
+    if (pcbTemp < tempStats.minTemp || tempStats.minTemp == 0) {
+        tempStats.minTemp = pcbTemp;
+    }
+    if (pcbTemp > tempStats.maxTemp) {
+        tempStats.maxTemp = pcbTemp;
+    }
+    
+    // Store hourly reading
+    storeTemperatureReading();
+    
+    tempStats.lastUpdateTime = millis();
+}
+
+void displayElapsedTimeScreen() {
+    char timeBuffer[17];
+    lcd.clear();
+    lcd.print(F("Elapsed Time:"));
+    lcd.setCursor(0, 1);
+    
+    if (experimentState.isRunning) {
+        unsigned long currentTime = millis();
+        experimentState.elapsedSeconds = (currentTime - experimentState.startTime) / 1000;
+        formatElapsedTime(timeBuffer, experimentState.elapsedSeconds);
+        lcd.print(timeBuffer);
+    } else {
+        lcd.print(F("Not Running"));
+    }
+}
+
+void formatElapsedTime(char* buffer, unsigned long seconds) {
+    unsigned long days = seconds / 86400;
+    seconds %= 86400;
+    unsigned long hours = seconds / 3600;
+    seconds %= 3600;
+    unsigned long minutes = seconds / 60;
+    seconds %= 60;
+    
+    sprintf(buffer, "%03ldd %02lu:%02lu:%02lu", days, hours, minutes, seconds);
+}
+
+void toggleExperiment(bool start) {
+    experimentState.isRunning = start;
+    if (start) {
+        experimentState.startTime = millis();
+        experimentState.elapsedSeconds = 0;
+        
+        // Reset temperature stats
+        tempStats.minTemp = 0;
+        tempStats.maxTemp = 0;
+        tempStats.currentHourIndex = 0;
+        tempStats.lastUpdateTime = 0;
+        
+        // Initialize first temperature reading
+        updateTemperatureStats();
+    }
+}
+
+void storeTemperatureReading() {
+    // Store in hourly readings array
+    tempStats.hourlyReadings[tempStats.currentHourIndex] = tempStats.lastPCBTemp;
+    tempStats.currentHourIndex = (tempStats.currentHourIndex + 1) % 24;
+}
+
+float calculateTemperatureAverage() {
+    float sum = 0;
+    uint8_t count = 0;
+    
+    for (uint8_t i = 0; i < 24; i++) {
+        if (tempStats.hourlyReadings[i] != 0) {
+            sum += tempStats.hourlyReadings[i];
+            count++;
+        }
+    }
+    
+    return count > 0 ? sum / count : 0;
+}
+
+void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
+    const uint8_t NUM_ITEMS = 5;  // Total number of menu items
+    static uint8_t currentLED = 0;  // For LED status display
+    static bool showContent = false;  // Flag to track if we're showing content
+    
+    // Handle back button to exit content view
+    if (buttons & BUTTON_LEFT) {
+        showContent = false;
+        lcd.clear();
+    }
+    
+    // If we're showing content and not pressing back, maintain the current view
+    if (showContent) {
+        switch(displayMenuItem) {
+            case 0:  // LED States
+                displayLEDStateScreen(currentLED);
+                break;
+            case 1:  // Elapsed Time
+                displayElapsedTimeScreen();
+                break;
+            case 2:  // Temperature Data
+                displayTemperatureScreen();
+                break;
+            case 3:  // Current Time
+                DateTime now = rtc.now();
+                lcd.clear();
+                lcd.print(F("Date: "));
+                lcd.print(now.day());
+                lcd.print(F("/"));
+                lcd.print(now.month());
+                lcd.print(F("/"));
+                lcd.print(now.year());
+                lcd.setCursor(0, 1);
+                char timeBuffer[17];
+                sprintf(timeBuffer, "%s %02d:%02d:%02d", 
+                    daysOfTheWeek[now.dayOfTheWeek()],
+                    now.hour(),
+                    now.minute(),
+                    now.second()
+                );
+                lcd.print(timeBuffer);
+                break;
+            case 4:  // Stop Experiment
+                lcd.clear();
+                lcd.print(F("Stop Experiment"));
+                lcd.setCursor(0, 1);
+                lcd.print(experimentState.isRunning ? F("Running") : F("Stopped"));
+                break;
+        }
+        return;
+    }
+    
+    // Handle navigation when not showing content
+    if (buttons & BUTTON_UP) {
+        if (displayMenuItem > 0) displayMenuItem--;
+    }
+    if (buttons & BUTTON_DOWN) {
+        if (displayMenuItem < NUM_ITEMS - 1) displayMenuItem++;
+    }
+    
+    // Handle select button to show content
+    if (buttons & BUTTON_SELECT) {
+        showContent = true;
+        return;
+    }
+    
+    // Display menu items with cursor
+    lcd.clear();
+    
+    // Calculate which two items to show based on current position
+    uint8_t firstItem = (displayMenuItem / 2) * 2;
+    
+    // First line
+    if (firstItem < NUM_ITEMS) {
+        lcd.print(displayMenuItem == firstItem ? ">" : " ");
+        switch(firstItem) {
+            case 0: lcd.print(F("LED States")); break;
+            case 1: lcd.print(F("Elapsed Time")); break;
+            case 2: lcd.print(F("Temperature")); break;
+            case 3: lcd.print(F("Current Time")); break;
+            case 4: lcd.print(F("Stop Experiment")); break;
+        }
+    }
+    
+    // Second line
+    if (firstItem + 1 < NUM_ITEMS) {
+        lcd.setCursor(0, 1);
+        lcd.print(displayMenuItem == firstItem + 1 ? ">" : " ");
+        switch(firstItem + 1) {
+            case 1: lcd.print(F("Elapsed Time")); break;
+            case 2: lcd.print(F("Temperature")); break;
+            case 3: lcd.print(F("Current Time")); break;
+            case 4: lcd.print(F("Stop Experiment")); break;
+        }
+    }
+}
+
+void handlePWMSettings(uint8_t buttons) {
+    static uint8_t pwmMenuItem = 0;  // 0 = View Current PWM, 1 = Change PWM Config
+    const uint8_t NUM_ITEMS = 2;
+    
+    // Handle navigation
+    if (buttons & BUTTON_UP && pwmMenuItem > 0) {
+        pwmMenuItem--;
+    }
+    if (buttons & BUTTON_DOWN && pwmMenuItem < NUM_ITEMS - 1) {
+        pwmMenuItem++;
+    }
+    
+    // Display menu
+    lcd.clear();
+    lcd.print(pwmMenuItem == 0 ? ">" : " ");
+    lcd.print(F("View PWM"));
+    lcd.setCursor(0, 1);
+    lcd.print(pwmMenuItem == 1 ? ">" : " ");
+    lcd.print(F("Change PWM"));
+    
+    // Handle selection
+    if (buttons & BUTTON_SELECT) {
+        switch(pwmMenuItem) {
+            case 0:  // View Current PWM
+                displayPWMStatus();
+                break;
+            case 1:  // Change PWM Config
+                handlePWMFrequencyConfig(buttons);
+                break;
+        }
+    }
+}
+
 
