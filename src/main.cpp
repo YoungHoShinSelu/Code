@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <stdint.h>
 #include <Wire.h>
+
+
 #include <Adafruit_RGBLCDShield.h>
 #include <utility/Adafruit_MCP23017.h>
 #include "Linduino.h"
@@ -27,6 +29,14 @@ struct ExperimentState {
     unsigned long elapsedSeconds;
 } experimentState;
 
+// Menu state structure for managing menu navigation
+struct MenuStateVars {
+    bool showContent;    // Flag to track if we're showing content
+    bool isFirstEntry;   // Track if this is first entry into menu
+    uint8_t currentItem; // Current selected menu item
+
+    MenuStateVars() : showContent(false), isFirstEntry(true), currentItem(0) {}
+};
 
 // Forward declare the PWM configuration structures
 struct PWMFreqConfig {
@@ -72,12 +82,15 @@ float calculateTemperatureAverage();
 void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem);  // New declaration
 void handlePWMSettings(uint8_t buttons);
 char daysOfTheWeek[7][4] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};  // Using 3-letter abbreviations to save space
+// Add with other global variables
+bool showContent = false;
+void updateLEDCache();
 
 // New function declarations for Individual Control Enhancement
 bool isChannelAvailable(uint8_t led, uint8_t channel);
 void displayAvailableChannels(uint8_t led);
 const char* getChannelName(uint8_t channel);
-void updateChannelDisplay(uint8_t led, uint8_t channel);
+void updateChannelDisplay(uint8_t led, uint8_t channel, float brightness);
 uint8_t findNextAvailableChannel(uint8_t led, uint8_t currentChannel, bool forward);
 
 // Menu navigation functions
@@ -140,6 +153,18 @@ Adafruit_RGBLCDShield lcd = Adafruit_RGBLCDShield();
 
 // LCD backlight color definitions
 #define RED 0x1
+
+// LED state cache structure
+struct LEDStateCache {
+    unsigned long lastUpdate;
+    float channelBrightness[4][4];
+    bool isValid;
+};
+// Cache update interval (1 second)
+static const unsigned long UPDATE_INTERVAL = 5000;  // Increase to 5 seconds
+
+// Global instance of LED state cache
+LEDStateCache ledStateCache = {0, {{0}}, false};
 #define YELLOW 0x3
 #define GREEN 0x2
 #define TEAL 0x6
@@ -207,6 +232,8 @@ enum StatusMenuState {
 // Global variables
 MenuState currentMenu = MenuState::MAIN_MENU;
 uint8_t menuPosition = 0;
+// Global menu state instance for status display
+MenuStateVars statusDisplayState;
 float currentBrightness = 100.0;
 uint8_t currentPWMResolution = 13;
 unsigned long lastDisplayUpdate = 0;
@@ -837,18 +864,26 @@ uint16_t calculatePWM(float percentage, uint8_t scl) {
 
     return (uint16_t)value;
 }
-
 // Set PWM duty cycle for a channel
 void setPWMDutyCycle(uint8_t address, uint8_t channel, float duty_cycle) {
     uint8_t scl = currentPWMResolution - 6;  // Convert resolution to SCL value
     uint16_t pwm_value = calculatePWM(duty_cycle, scl);
-    
+
     uint8_t dimh_reg = DIM1H + (channel * 0x10);
     uint8_t diml_reg = DIM1L + (channel * 0x10);
-    
+
     uint8_t dimh = (scl << 5) | ((pwm_value >> 8) & 0x1F);
     uint8_t diml = pwm_value & 0xFF;
-    
+
+    // Get LED index from address
+    uint8_t led_idx = 0;
+    const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
+    for(uint8_t i = 0; i < 4; i++) if(addresses[i] == address) led_idx = i;
+
+    // Update cache
+    ledStateCache.channelBrightness[led_idx][channel] = duty_cycle;
+    ledStateCache.isValid = true;
+
     verifyI2CWriteRS(address, dimh_reg, dimh, diml_reg, diml);
 }
 
@@ -965,7 +1000,7 @@ void updateChannelDisplay(uint8_t led, uint8_t channel, float brightness) {
     }
     lcd.setCursor(0, 1);
     lcd.print(F("Bright: "));
-    lcd.print(brightness, 1);
+    lcd.print((int)(brightness + 0.5f));  // Round to nearest integer
     lcd.print(F("%"));
 }
 
@@ -992,7 +1027,6 @@ void handleIndividualControl(uint8_t buttons) {
     static uint8_t selectedLED = 0;      // 0-3 for LED1-4
     static uint8_t selectedChannel = 0;   // 0-3 for WHITE/BLUE/GREEN/RED
     static bool inChannelMode = false;    // false = LED select, true = Channel control
-    static float channelBrightness[4][4] = {{0}};  // Store brightness for each LED/channel
     const float MAX_ACTUAL_BRIGHTNESS = 12.0;  // Maximum actual brightness percentage due to hardware limitations
     const float BRIGHTNESS_STEP = 1.0;         // 1% per step
     const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
@@ -1082,6 +1116,11 @@ void handleIndividualControl(uint8_t buttons) {
                 }
 
                 lt3966_i2c_write_rs(addresses[selectedLED], dimh_reg, dim_high, diml_reg, dim_low);
+
+                // Update both arrays with the new brightness
+                ledStateCache.channelBrightness[selectedLED][selectedChannel] = channelBrightness[selectedLED][selectedChannel];
+                ledStateCache.isValid = true;
+                ledStateCache.lastUpdate = millis();
                 updateChannelDisplay(selectedLED, selectedChannel, channelBrightness[selectedLED][selectedChannel]);
             }
         }
@@ -1110,6 +1149,11 @@ void handleIndividualControl(uint8_t buttons) {
                 }
 
                 lt3966_i2c_write_rs(addresses[selectedLED], dimh_reg, dim_high, diml_reg, dim_low);
+
+                // Update both arrays with the new brightness
+                ledStateCache.channelBrightness[selectedLED][selectedChannel] = channelBrightness[selectedLED][selectedChannel];
+                ledStateCache.isValid = true;
+                ledStateCache.lastUpdate = millis();
                 updateChannelDisplay(selectedLED, selectedChannel, channelBrightness[selectedLED][selectedChannel]);
             }
         }
@@ -1118,8 +1162,11 @@ void handleIndividualControl(uint8_t buttons) {
             // Turn channel completely off if it's available
             if (isChannelAvailable(selectedLED, selectedChannel)) {
                 channelBrightness[selectedLED][selectedChannel] = 0;
+                ledStateCache.channelBrightness[selectedLED][selectedChannel] = 0;
+                ledStateCache.isValid = true;
+                ledStateCache.lastUpdate = millis();
                 lt3966_i2c_write(addresses[selectedLED], GLBCFG, 0x0F);
-                updateChannelDisplay(selectedLED, selectedChannel, channelBrightness[selectedLED][selectedChannel]);
+                updateChannelDisplay(selectedLED, selectedChannel, 0);
             }
         }
     }
@@ -1129,9 +1176,10 @@ void handleStatusSettings(uint8_t buttons) {
     static StatusMenuState menuState = STATUS_SUBMENU_SELECT;
     static uint8_t subMenuSelection = 0;  // 0 = Status Display, 1 = PWM Settings
     static uint8_t displayMenuItem = 0;    // For Status Display sub-menu items
-    
     // Handle back button
     if (buttons & BUTTON_LEFT) {
+        // Reset status display state when navigating back
+        statusDisplayState = MenuStateVars();
         if (menuState == STATUS_SUBMENU_SELECT) {
             currentMenu = MAIN_MENU;
             // Immediately show main menu
@@ -1325,11 +1373,11 @@ void handleMainMenu(uint8_t buttons) {
                 break;
             case 1: 
                 currentMenu = INDIVIDUAL_CONTROL;
-                // Immediately show Individual Control menu
+                // Directly show LED1's channels
                 lcd.clear();
-                lcd.print(F("Select LED:"));
+                lcd.print(F("LED  Channel"));
                 lcd.setCursor(0, 1);
-                lcd.print(F("LED 1")); 
+                lcd.print(F("Selection"));
                 break;
             case 2: 
                 currentMenu = STATUS_SETTINGS;
@@ -1370,7 +1418,14 @@ void handleQuickControls(uint8_t buttons) {
             // Turn off all LEDs when exiting sequence mode
             for(uint8_t i = 0; i < 4; i++) {
                 lt3966_i2c_write(addresses[i], GLBCFG, 0x0F);
+                // Clear brightness values
+                for(uint8_t ch = 0; ch < 4; ch++) {
+                    channelBrightness[i][ch] = 0;
+                    ledStateCache.channelBrightness[i][ch] = 0;
+                }
             }
+            ledStateCache.isValid = true;
+            ledStateCache.lastUpdate = millis();
             inSequenceMode = false;
             // Show Quick Controls submenu immediately
             lcd.clear();
@@ -1410,8 +1465,11 @@ void handleQuickControls(uint8_t buttons) {
                     lt3966_i2c_write(addresses[i], ADIM3, 0xFF);
                     lt3966_i2c_write(addresses[i], ADIM4, 0xFF);
                     
-                    // Set all channels to 10% brightness
+                    // Set all channels to default brightness
                     for(uint8_t ch = 0; ch < 4; ch++) {
+                        // Skip RED channel for LED2 and LED4
+                        if (ch == 3 && (i == 1 || i == 3)) continue;
+                        
                         uint8_t dimh_reg = DIM1H + (ch * 0x10);
                         uint8_t diml_reg = dimh_reg + 1;
                         uint8_t scl = 5;  // 976.6 Hz
@@ -1419,11 +1477,23 @@ void handleQuickControls(uint8_t buttons) {
                         uint8_t dim_high = ((scl & 0x07) << 5) | ((pwm_value >> 8) & 0x1F);
                         uint8_t dim_low = pwm_value & 0xFF;
                         lt3966_i2c_write_rs(addresses[i], dimh_reg, dim_high, diml_reg, dim_low);
+                        
+                        // Update both arrays with the new brightness
+                        channelBrightness[i][ch] = DEFAULT_BRIGHTNESS;
+                        ledStateCache.channelBrightness[i][ch] = DEFAULT_BRIGHTNESS;
                     }
                 } else {
                     lt3966_i2c_write(addresses[i], GLBCFG, 0x0F);  // Turn off all channels
+                    // Clear all brightness values
+                    for(uint8_t ch = 0; ch < 4; ch++) {
+                        channelBrightness[i][ch] = 0;
+                        ledStateCache.channelBrightness[i][ch] = 0;
+                    }
                 }
             }
+            // Update cache status
+            ledStateCache.isValid = true;
+            ledStateCache.lastUpdate = millis();
         } else {  // Sequence mode
             inSequenceMode = !inSequenceMode;
             currentLED = 0;
@@ -1433,7 +1503,14 @@ void handleQuickControls(uint8_t buttons) {
             // Turn off all LEDs when starting sequence
             for(uint8_t i = 0; i < 4; i++) {
                 lt3966_i2c_write(addresses[i], GLBCFG, 0x0F);
+                // Clear all brightness values
+                for(uint8_t ch = 0; ch < 4; ch++) {
+                    channelBrightness[i][ch] = 0;
+                    ledStateCache.channelBrightness[i][ch] = 0;
+                }
             }
+            ledStateCache.isValid = true;
+            ledStateCache.lastUpdate = millis();
         }
     }
 
@@ -1441,21 +1518,31 @@ void handleQuickControls(uint8_t buttons) {
     if (inSequenceMode && menuOption == 1 && (millis() - lastSequenceUpdate >= SEQUENCE_DELAY)) {
         lastSequenceUpdate = millis();
         
-        // Turn off previous LED
+        // Turn off previous LED and clear its brightness values
         if (currentLED < 4) {
             lt3966_i2c_write(addresses[currentLED], GLBCFG, 0x0F);
+            for(uint8_t ch = 0; ch < 4; ch++) {
+                channelBrightness[currentLED][ch] = 0;
+                ledStateCache.channelBrightness[currentLED][ch] = 0;
+            }
         }
         
         // Check if sequence is complete
-        if (currentLED >= 3 && currentChannel >= 3) {  // At LED4 RED
+        if (currentLED >= 3 && currentChannel >= 3) {
             // Turn off all LEDs
             for(uint8_t i = 0; i < 4; i++) {
                 lt3966_i2c_write(addresses[i], GLBCFG, 0x0F);
+                for(uint8_t ch = 0; ch < 4; ch++) {
+                    channelBrightness[i][ch] = 0;
+                    ledStateCache.channelBrightness[i][ch] = 0;
+                }
             }
             // Reset sequence mode
             inSequenceMode = false;
             currentLED = 0;
             currentChannel = 0;
+            ledStateCache.isValid = true;
+            ledStateCache.lastUpdate = millis();
             // Return to Quick Controls submenu
             lcd.clear();
             lcd.print(F("Quick Control:"));
@@ -1464,14 +1551,13 @@ void handleQuickControls(uint8_t buttons) {
             return;
         }
 
-        // Move to next LED/channel
-        if (currentChannel >= 4) {
+        // Skip RED channel for LED2 and LED4
+        if (currentChannel == 3 && (currentLED == 1 || currentLED == 3)) {
             currentChannel = 0;
             currentLED++;
         }
-
-        // Turn on current LED/channel BEFORE updating display
-        // This ensures the display matches the actual LED state
+        
+        // Turn on current LED/channel
         lt3966_i2c_write(addresses[currentLED], GLBCFG, 0x00);
         lt3966_i2c_write(addresses[currentLED], ADIM1 + currentChannel, 0xFF);
         
@@ -1483,7 +1569,13 @@ void handleQuickControls(uint8_t buttons) {
         uint8_t dim_low = pwm_value & 0xFF;
         lt3966_i2c_write_rs(addresses[currentLED], dimh_reg, dim_high, diml_reg, dim_low);
         
-        // Update display AFTER LED is turned on
+        // Update brightness values for current channel
+        channelBrightness[currentLED][currentChannel] = DEFAULT_BRIGHTNESS;
+        ledStateCache.channelBrightness[currentLED][currentChannel] = DEFAULT_BRIGHTNESS;
+        ledStateCache.isValid = true;
+        ledStateCache.lastUpdate = millis();
+        
+        // Update display
         lcd.clear();
         lcd.print(F("Quick Control:"));
         lcd.setCursor(0, 1);
@@ -2201,7 +2293,7 @@ struct TemperatureStats {
 
 void displayLEDStateScreen(uint8_t currentLED, uint8_t buttons) {
     static uint8_t selectedLED = 0;  // Track which LED is selected
-    
+
     // Handle navigation if buttons are pressed
     if (buttons & BUTTON_UP) {
         if (selectedLED > 0) selectedLED--;
@@ -2209,35 +2301,46 @@ void displayLEDStateScreen(uint8_t currentLED, uint8_t buttons) {
     if (buttons & BUTTON_DOWN) {
         if (selectedLED < 3) selectedLED++;
     }
-    
-    // Display current LED and its channel values
+
+    // Display LED state
     lcd.clear();
     lcd.print(F("LED"));
     lcd.print(selectedLED + 1);
-    lcd.print(F(" Ch:"));
+    lcd.print(F(" (%): "));
     
-    // Display channel percentages on second line
+    // First line shows White channel
+    lcd.print(F("W"));
+    int w_val = (int)channelBrightness[selectedLED][0];
+    if (w_val < 10) lcd.print(" ");  // Add space for single digit
+    if (w_val < 100) lcd.print(" "); // Add space for double digit
+    lcd.print(w_val);
+
+    // Second line shows Blue, Green, Red
     lcd.setCursor(0, 1);
     
-    // WHITE (W)
-    lcd.print(F("W"));
-    lcd.print((int)channelBrightness[selectedLED][0]);
-    lcd.print(F(" "));
-    
-    // BLUE (B)
+    // Blue
     lcd.print(F("B"));
-    lcd.print((int)channelBrightness[selectedLED][1]);
+    int b_val = (int)channelBrightness[selectedLED][1];
+    if (b_val < 10) lcd.print(" ");
+    if (b_val < 100) lcd.print(" ");
+    lcd.print(b_val);
     lcd.print(F(" "));
     
-    // GREEN (G)
+    // Green
     lcd.print(F("G"));
-    lcd.print((int)channelBrightness[selectedLED][2]);
+    int g_val = (int)channelBrightness[selectedLED][2];
+    if (g_val < 10) lcd.print(" ");
+    if (g_val < 100) lcd.print(" ");
+    lcd.print(g_val);
     lcd.print(F(" "));
     
-    // RED (R) - Only show if available
-    if (selectedLED != 1 && selectedLED != 3) {  // Not LED2 or LED4
+    // Red (only if available)
+    if (isChannelAvailable(selectedLED, 3)) {  // Check if RED channel is available
         lcd.print(F("R"));
-        lcd.print((int)channelBrightness[selectedLED][3]);
+        int r_val = (int)channelBrightness[selectedLED][3];
+        if (r_val < 10) lcd.print(" ");
+        if (r_val < 100) lcd.print(" ");
+        lcd.print(r_val);
     }
 }
 
@@ -2349,29 +2452,27 @@ float calculateTemperatureAverage() {
 
 void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
     const uint8_t NUM_ITEMS = 5;  // Total number of menu items
-    static bool showContent = false;  // Flag to track if we're showing content
-    static bool isFirstEntry = true;  // Track if this is first entry into menu
     
     // Reset state when first entering the menu
-    if (isFirstEntry) {
-        showContent = false;
-        displayMenuItem = 0;
-        isFirstEntry = false;
+    if (statusDisplayState.isFirstEntry) {
+        statusDisplayState.showContent = false;
+        statusDisplayState.currentItem = 0;
+        statusDisplayState.isFirstEntry = false;
     }
     
     // Handle back button
     if (buttons & BUTTON_LEFT) {
-        if (showContent) {
-            showContent = false;  // Return to menu navigation
-            isFirstEntry = false; // Ensure we stay in menu mode
+        if (statusDisplayState.showContent) {
+            statusDisplayState.showContent = false;  // Return to menu navigation
+            statusDisplayState.isFirstEntry = false; // Ensure we stay in menu mode
         } else {
-            isFirstEntry = true;  // Reset for next entry
+            statusDisplayState.isFirstEntry = true;  // Reset for next entry
             return;  // Return to parent menu
         }
     }
     
     // If we're showing content, display the appropriate screen
-    if (showContent) {
+    if (statusDisplayState.showContent) {
         switch(displayMenuItem) {
             case 0:  // LED States
                 displayLEDStateScreen(0, buttons);
@@ -2413,6 +2514,7 @@ void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
                     lcd.setCursor(0, 1);
                     lcd.print(F("Stopped!"));
                     delay(1000);
+                    statusDisplayState.showContent = false;
                     showContent = false;
                 }
                 break;
@@ -2428,7 +2530,7 @@ void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
         if (displayMenuItem < NUM_ITEMS - 1) displayMenuItem++;
     }
     if (buttons & BUTTON_SELECT) {
-        showContent = true;
+        statusDisplayState.showContent = true;
         return;
     }
     
@@ -2494,4 +2596,35 @@ void handlePWMSettings(uint8_t buttons) {
     }
 }
 
+// New function to update LED cache in background
+void updateLEDCache() {
+    const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
+    static uint8_t currentLED = 0;
+    static uint8_t currentChannel = 0;
+    
+    // Read one channel at a time
+    uint8_t dimh_reg = DIM1H + (currentChannel * 0x10);
+    uint8_t dimh_value, diml_value;
+    
+    if (lt3966_i2c_read(addresses[currentLED], dimh_reg, &dimh_value) &&
+        lt3966_i2c_read(addresses[currentLED], dimh_reg + 1, &diml_value)) {
+        
+        uint8_t scl = (dimh_value >> 5) & 0x07;
+        uint16_t pwm_value = ((dimh_value & 0x1F) << 8) | diml_value;
+        uint16_t period = 1 << (6 + scl);
+        ledStateCache.channelBrightness[currentLED][currentChannel] = (float)pwm_value / (period - 1) * 100.0f;
+        
+        // Move to next channel/LED
+        currentChannel++;
+        if (currentChannel >= 4) {
+            currentChannel = 0;
+            currentLED++;
+            if (currentLED >= 4) {
+                currentLED = 0;
+                ledStateCache.lastUpdate = millis();
+                ledStateCache.isValid = true;
+            }
+        }
+    }
+}
 
