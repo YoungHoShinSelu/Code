@@ -1,16 +1,15 @@
 #include <Arduino.h>
 #include <stdint.h>
 #include <Wire.h>
-
-
 #include <Adafruit_RGBLCDShield.h>
 #include <utility/Adafruit_MCP23017.h>
 #include "Linduino.h"
 #include "LT3966.h"
 #include <EEPROM.h>
-#include "RTClib.h"
+#include <I2C_RTC.h>  // Replace RTClib.h
 #include <util/crc16.h>  // For CRC calculation
 #include <Adafruit_PCT2075.h>
+#include <time.h>  // For time_t
 
 // New LED module addresses - ADD THESE BEFORE setup()
 #define LT3966_ADD1  0b1111   // ADD1: VCC, ADD2: VCC (0x5F)
@@ -85,7 +84,7 @@ char daysOfTheWeek[7][4] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};  /
 // Add with other global variables
 bool showContent = false;
 void updateLEDCache();
-
+void displayCurrentTime();
 // New function declarations for Individual Control Enhancement
 bool isChannelAvailable(uint8_t led, uint8_t channel);
 void displayAvailableChannels(uint8_t led);
@@ -186,8 +185,11 @@ struct RunningStats {
         bool is_active;
         uint8_t current_level;
         uint8_t config;
-        TimeStamp total_runtime;
-        unsigned long start_time;
+        uint32_t total_seconds;  // Instead of TimeStamp
+        float max_current;
+        float min_current;
+        float avg_current;
+        uint32_t last_update;
     } channels[4][4];
 };
 
@@ -259,8 +261,8 @@ extern RunningStats stats;
 // Define RTC address
 #define DS3231_ADDRESS 0x68
 
-// Modify RTC instance declaration
-RTC_DS3231 rtc;  // The address is handled internally by the library
+// Replace RTC_DS3231 rtc with:
+static DS3231 RTC;
 
 // Add before BlockHeader
 struct __attribute__((packed)) MetaData {
@@ -323,13 +325,12 @@ struct __attribute__((packed)) ErrorInfo {
 
 // Add after other structures
 struct RuntimeLog {
-    DateTime startTime;
-    DateTime endTime;
+    time_t startTime;
+    time_t endTime;
     uint8_t led;
     uint8_t channel;
     float current_mA;
     uint8_t pwmResolution;
-    bool inPhaseMode;
     float temperature;
 };
 
@@ -341,12 +342,12 @@ private:
 public:
     void logChannelStart(uint8_t led, uint8_t channel, float current) {
         RuntimeLog log;
-        log.startTime = rtc.now();
+        log.startTime = RTC.getEpoch(true);  // Get Unix timestamp directly
         log.led = led;
         log.channel = channel;
         log.current_mA = current;
         log.pwmResolution = currentPWMResolution;
-        log.temperature = rtc.getTemperature();
+        log.temperature = RTC.getTemp();
         
         uint16_t addr = getLogAddress(led, channel);
         EEPROM.put(addr, log);
@@ -356,7 +357,7 @@ public:
         uint16_t addr = getLogAddress(led, channel);
         RuntimeLog log;
         EEPROM.get(addr, log);
-        log.endTime = rtc.now();
+        log.endTime = RTC.getEpoch(true);  // Get Unix timestamp directly
         EEPROM.put(addr, log);
     }
 
@@ -692,7 +693,7 @@ void setup() {
     Wire.beginTransmission(DS3231_ADDRESS);
     if (Wire.endTransmission() == 0) {
         Serial.println(F("RTC found at 0x68"));
-        if (!rtc.begin()) {
+        if (!RTC.begin()) {
             Serial.println(F("RTC init failed"));
             lcd.clear();
             lcd.print(F("RTC Error"));
@@ -1005,6 +1006,9 @@ void updateChannelDisplay(uint8_t led, uint8_t channel, float brightness) {
 }
 
 void displayAvailableChannels(uint8_t led) {
+    // Add bounds check to prevent showing LED5
+    if (led >= 4) return;  // Only show channels for LED1-4
+    
     lcd.clear();
     lcd.print(F("LED"));
     lcd.print(led + 1);
@@ -1027,13 +1031,22 @@ void handleIndividualControl(uint8_t buttons) {
     static uint8_t selectedLED = 0;      // 0-3 for LED1-4
     static uint8_t selectedChannel = 0;   // 0-3 for WHITE/BLUE/GREEN/RED
     static bool inChannelMode = false;    // false = LED select, true = Channel control
+    static bool inRunMode = false;        // true when in Run Experiment menu
     const float MAX_ACTUAL_BRIGHTNESS = 12.0;  // Maximum actual brightness percentage due to hardware limitations
     const float BRIGHTNESS_STEP = 1.0;         // 1% per step
     const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
 
     // Handle back button
     if (buttons & BUTTON_LEFT) {
-        if (inChannelMode) {
+        if (inRunMode) {
+            // Return to LED selection
+            inRunMode = false;
+            inChannelMode = false;
+            lcd.clear();
+            lcd.print(F(">LED "));
+            lcd.print(selectedLED + 1);
+            displayAvailableChannels(selectedLED);
+        } else if (inChannelMode) {
             // Return to LED selection
             inChannelMode = false;
             lcd.clear();
@@ -1052,6 +1065,63 @@ void handleIndividualControl(uint8_t buttons) {
         return;
     }
 
+    if (inRunMode) {
+        // Run Experiment mode
+        if (buttons & BUTTON_SELECT) {
+            // Start the experiment
+            experimentState.isRunning = true;
+            experimentState.startTime = millis();
+            experimentState.elapsedSeconds = 0;
+
+            // Turn on all configured LEDs
+            for(uint8_t led = 0; led < 4; led++) {
+                bool anyChannelActive = false;
+                for(uint8_t ch = 0; ch < 4; ch++) {
+                    if (channelBrightness[led][ch] > 0) {
+                        anyChannelActive = true;
+                        break;
+                    }
+                }
+                
+                if (anyChannelActive) {
+                    lt3966_i2c_write(addresses[led], GLBCFG, 0x00);  // Enable channels
+                    for(uint8_t ch = 0; ch < 4; ch++) {
+                        if (channelBrightness[led][ch] > 0 && isChannelAvailable(led, ch)) {
+                            float actualBrightness = (channelBrightness[led][ch] / 100.0f) * MAX_ACTUAL_BRIGHTNESS;
+                            uint8_t dimh_reg = DIM1H + (ch * 0x10);
+                            uint8_t diml_reg = dimh_reg + 1;
+                            uint8_t scl = 5;  // PWM scaling factor
+                            uint16_t pwm_value = calculatePWM(actualBrightness, scl);
+                            uint8_t dim_high = ((scl & 0x07) << 5) | ((pwm_value >> 8) & 0x1F);
+                            uint8_t dim_low = pwm_value & 0xFF;
+                            lt3966_i2c_write(addresses[led], ADIM1 + ch, 0xFF);
+                            lt3966_i2c_write_rs(addresses[led], dimh_reg, dim_high, diml_reg, dim_low);
+                        }
+                    }
+                }
+            }
+            
+            // Update display
+            lcd.clear();
+            lcd.print(F("Experiment"));
+            lcd.setCursor(0, 1);
+            lcd.print(F("Started!"));
+            delay(1000);
+            
+            // Return to main menu
+            currentMenu = MAIN_MENU;
+            menuPosition = 1;
+            return;
+        }
+        
+        // Display Run Experiment screen
+        lcd.clear();
+        lcd.print(F("Run Experiment?"));
+        lcd.setCursor(0, 1);
+        lcd.print(F("Select to Start"));
+        return;
+    }
+
     if (!inChannelMode) {
         // LED Selection Mode
         if (buttons & BUTTON_UP) {
@@ -1062,24 +1132,40 @@ void handleIndividualControl(uint8_t buttons) {
             displayAvailableChannels(selectedLED);
         }
         if (buttons & BUTTON_DOWN) {
-            if (selectedLED < 3) selectedLED++;
-            lcd.clear();
-            lcd.print(F(">LED "));
-            lcd.print(selectedLED + 1);
-            displayAvailableChannels(selectedLED);
+            if (selectedLED < 4) selectedLED++;  // Allow one more position for Run Experiment
+            if (selectedLED == 4) {
+                lcd.clear();
+                lcd.print(F(">Run Experiment"));
+                lcd.setCursor(0, 1);
+                lcd.print(F("Select to Start"));
+            } else {
+                lcd.clear();
+                lcd.print(F(">LED "));
+                lcd.print(selectedLED + 1);
+                displayAvailableChannels(selectedLED);
+            }
         }
         if (buttons & BUTTON_SELECT) {
-            inChannelMode = true;
-            // Find first available channel for this LED
-            selectedChannel = 0;
-            while(!isChannelAvailable(selectedLED, selectedChannel) && selectedChannel < 4) {
-                selectedChannel++;
+            if (selectedLED == 4) {
+                // Enter Run Experiment mode
+                inRunMode = true;
+                lcd.clear();
+                lcd.print(F("Run Experiment?"));
+                lcd.setCursor(0, 1);
+                lcd.print(F("Select to Start"));
+            } else {
+                inChannelMode = true;
+                // Find first available channel for this LED
+                selectedChannel = 0;
+                while(!isChannelAvailable(selectedLED, selectedChannel) && selectedChannel < 4) {
+                    selectedChannel++;
+                }
+                // Update display with channel info
+                updateChannelDisplay(selectedLED, selectedChannel, channelBrightness[selectedLED][selectedChannel]);
             }
-            // Update display with channel info
-            updateChannelDisplay(selectedLED, selectedChannel, channelBrightness[selectedLED][selectedChannel]);
         }
     } else {
-        // Channel Control Mode
+        // Channel Control Mode - Store brightness values but don't turn on LEDs yet
         if (buttons & BUTTON_UP || buttons & BUTTON_DOWN) {
             // Change channel
             if (buttons & BUTTON_UP) {
@@ -1099,25 +1185,7 @@ void handleIndividualControl(uint8_t buttons) {
                 if (channelBrightness[selectedLED][selectedChannel] > 100.0) {
                     channelBrightness[selectedLED][selectedChannel] = 100.0;
                 }
-
-                float actualBrightness = (channelBrightness[selectedLED][selectedChannel] / 100.0f) * MAX_ACTUAL_BRIGHTNESS;
-
-                uint8_t dimh_reg = DIM1H + (selectedChannel * 0x10);
-                uint8_t diml_reg = dimh_reg + 1;
-                uint8_t scl = 5;  // PWM scaling factor
-
-                uint16_t pwm_value = calculatePWM(actualBrightness, scl);
-                uint8_t dim_high = ((scl & 0x07) << 5) | ((pwm_value >> 8) & 0x1F);
-                uint8_t dim_low = pwm_value & 0xFF;
-
-                if (channelBrightness[selectedLED][selectedChannel] > 0) {
-                    lt3966_i2c_write(addresses[selectedLED], GLBCFG, 0x00);
-                    lt3966_i2c_write(addresses[selectedLED], ADIM1 + selectedChannel, 0xFF);
-                }
-
-                lt3966_i2c_write_rs(addresses[selectedLED], dimh_reg, dim_high, diml_reg, dim_low);
-
-                // Update both arrays with the new brightness
+                // Store the brightness value but don't turn on LED yet
                 ledStateCache.channelBrightness[selectedLED][selectedChannel] = channelBrightness[selectedLED][selectedChannel];
                 ledStateCache.isValid = true;
                 ledStateCache.lastUpdate = millis();
@@ -1133,24 +1201,7 @@ void handleIndividualControl(uint8_t buttons) {
                 if (channelBrightness[selectedLED][selectedChannel] < 0.0) {
                     channelBrightness[selectedLED][selectedChannel] = 0.0;
                 }
-
-                float actualBrightness = (channelBrightness[selectedLED][selectedChannel] / 100.0f) * MAX_ACTUAL_BRIGHTNESS;
-
-                uint8_t dimh_reg = DIM1H + (selectedChannel * 0x10);
-                uint8_t diml_reg = dimh_reg + 1;
-                uint8_t scl = 5;  // PWM scaling factor
-
-                uint16_t pwm_value = calculatePWM(actualBrightness, scl);
-                uint8_t dim_high = ((scl & 0x07) << 5) | ((pwm_value >> 8) & 0x1F);
-                uint8_t dim_low = pwm_value & 0xFF;
-
-                if (channelBrightness[selectedLED][selectedChannel] == 0) {
-                    lt3966_i2c_write(addresses[selectedLED], GLBCFG, 0x0F);
-                }
-
-                lt3966_i2c_write_rs(addresses[selectedLED], dimh_reg, dim_high, diml_reg, dim_low);
-
-                // Update both arrays with the new brightness
+                // Store the brightness value but don't turn on LED yet
                 ledStateCache.channelBrightness[selectedLED][selectedChannel] = channelBrightness[selectedLED][selectedChannel];
                 ledStateCache.isValid = true;
                 ledStateCache.lastUpdate = millis();
@@ -1159,13 +1210,12 @@ void handleIndividualControl(uint8_t buttons) {
         }
 
         if (buttons & BUTTON_SELECT) {
-            // Turn channel completely off if it's available
+            // Set channel to 0% if it's available
             if (isChannelAvailable(selectedLED, selectedChannel)) {
                 channelBrightness[selectedLED][selectedChannel] = 0;
                 ledStateCache.channelBrightness[selectedLED][selectedChannel] = 0;
                 ledStateCache.isValid = true;
                 ledStateCache.lastUpdate = millis();
-                lt3966_i2c_write(addresses[selectedLED], GLBCFG, 0x0F);
                 updateChannelDisplay(selectedLED, selectedChannel, 0);
             }
         }
@@ -1693,9 +1743,11 @@ void displayCurrentSettings() {
 
 // Simplify ChannelLog
 struct ChannelLog {
-    TimeStamp runtime;          // 3 bytes
-    uint8_t current_level;      // 1 byte
-    uint8_t config;            // 1 byte (PWM resolution)
+    uint32_t total_seconds;  // Instead of TimeStamp
+    float max_current;
+    float min_current;
+    float avg_current;
+    uint32_t last_update;
 }; // Total: 5 bytes per entry
 
 class LogManager {
@@ -1720,11 +1772,13 @@ RunningStats stats;
 void updateChannelRuntime(uint8_t led, uint8_t channel, RunningStats& stats) {
     if(stats.channels[led][channel].is_active) {
         uint32_t current = millis();
-        uint32_t elapsed = (current - stats.channels[led][channel].start_time) / 1000;
+        uint32_t elapsed = (current - stats.channels[led][channel].last_update) / 1000;
         
-        stats.channels[led][channel].total_runtime.hours = elapsed / 3600;
-        stats.channels[led][channel].total_runtime.minutes = (elapsed % 3600) / 60;
-        stats.channels[led][channel].total_runtime.seconds = elapsed % 60;
+        stats.channels[led][channel].total_seconds += elapsed;
+        stats.channels[led][channel].max_current = max(stats.channels[led][channel].max_current, stats.channels[led][channel].avg_current);
+        stats.channels[led][channel].min_current = min(stats.channels[led][channel].min_current, stats.channels[led][channel].avg_current);
+        stats.channels[led][channel].avg_current = (stats.channels[led][channel].total_seconds / stats.channels[led][channel].is_active) / 1000.0f;
+        stats.channels[led][channel].last_update = current;
     }
 }
 
@@ -1745,33 +1799,11 @@ void monitorChannelStatus() {
 }
 
 // Add these missing function declarations at the top
-TimeStamp getCurrentTime();
-String formatTime(TimeStamp time);
 uint8_t getAddressForLED(uint8_t led);
 void readLogFromEEPROM(uint16_t addr, ChannelLog* log);
 uint16_t calculateChecksum(ChannelLog* log);
 
 // Add implementations
-TimeStamp getCurrentTime() {
-    uint32_t current = millis() / 1000; // Convert to seconds
-    TimeStamp time;
-    time.hours = current / 3600;
-    time.minutes = (current % 3600) / 60;
-    time.seconds = current % 60;
-    return time;
-}
-
-String formatTime(TimeStamp time) {
-    char buffer[9];
-    sprintf(buffer, "%02d:%02d:%02lu", time.hours, time.minutes, time.seconds);
-    return String(buffer);
-}
-
-uint8_t getAddressForLED(uint8_t led) {
-    const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
-    return addresses[led];
-}
-
 void readLogFromEEPROM(uint16_t addr, ChannelLog* log) {
     EEPROM.get(addr, *log);
 }
@@ -1792,7 +1824,11 @@ void initializeLogging() {
             stats.channels[led][channel].is_active = false;
             stats.channels[led][channel].current_level = 0;
             stats.channels[led][channel].config = 0;
-            memset(&stats.channels[led][channel].total_runtime, 0, sizeof(TimeStamp));
+            stats.channels[led][channel].total_seconds = 0;
+            stats.channels[led][channel].max_current = 0;
+            stats.channels[led][channel].min_current = 0;
+            stats.channels[led][channel].avg_current = 0;
+            stats.channels[led][channel].last_update = 0;
         }
     }
     
@@ -1819,7 +1855,7 @@ void LogManager::saveLogToEEPROM(uint16_t addr, ChannelLog& log) {
 
 void LogManager::logChannelEvent(uint8_t led, uint8_t channel, bool is_start) {
     if (is_start) {
-        stats.channels[led][channel].start_time = millis();
+        stats.channels[led][channel].last_update = millis();
         stats.channels[led][channel].is_active = true;
     } else {
         stats.channels[led][channel].is_active = false;
@@ -2067,9 +2103,9 @@ public:
                 EEPROM.get(addr, log);
                 
                 // Print in CSV format
-                printDateTime(log.startTime);
+                Serial.print(log.startTime);
                 Serial.print(',');
-                printDateTime(log.endTime);
+                Serial.print(log.endTime);
                 Serial.print(',');
                 Serial.print(log.led + 1);
                 Serial.print(',');
@@ -2085,19 +2121,7 @@ public:
     }
 
 private:
-    void printDateTime(const DateTime& dt) {
-        Serial.print(dt.year(), DEC);
-        Serial.print('/');
-        Serial.print(dt.month(), DEC);
-        Serial.print('/');
-        Serial.print(dt.day(), DEC);
-        Serial.print(' ');
-        Serial.print(dt.hour(), DEC);
-        Serial.print(':');
-        Serial.print(dt.minute(), DEC);
-        Serial.print(':');
-        Serial.print(dt.second(), DEC);
-    }
+    // Removed printDateTime function
 };
 
 
@@ -2366,7 +2390,7 @@ void displayTemperatureScreen() {
 }
 
 void updateTemperatureStats() {
-    float ambientTemp = rtc.getTemperature();
+    float ambientTemp = RTC.getTemp();
     float pcbTemp = tempsensor.getTemperature();
     
     tempStats.lastAmbientTemp = ambientTemp;
@@ -2484,23 +2508,7 @@ void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
                 displayTemperatureScreen();
                 break;
             case 3:  // Current Time
-                DateTime now = rtc.now();
-                lcd.clear();
-                lcd.print(F("Date: "));
-                lcd.print(now.day());
-                lcd.print(F("/"));
-                lcd.print(now.month());
-                lcd.print(F("/"));
-                lcd.print(now.year());
-                lcd.setCursor(0, 1);
-                char timeBuffer[17];
-                sprintf(timeBuffer, "%s %02d:%02d:%02d", 
-                    daysOfTheWeek[now.dayOfTheWeek()],
-                    now.hour(),
-                    now.minute(),
-                    now.second()
-                );
-                lcd.print(timeBuffer);
+                displayCurrentTime();  // Use our new displayCurrentTime function
                 break;
             case 4:  // Stop Experiment
                 lcd.clear();
@@ -2626,5 +2634,91 @@ void updateLEDCache() {
             }
         }
     }
+}
+
+// Add time structure for RTC data
+struct RTCDateTime {
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+    uint8_t day;
+    uint8_t month;
+    uint16_t year;
+    time_t timestamp;
+};
+
+// Function to get current time from RTC
+RTCDateTime getCurrentTime() {
+    RTCDateTime dt;
+    dt.hour = RTC.getHours();
+    dt.minute = RTC.getMinutes();
+    dt.second = RTC.getSeconds();
+    dt.day = RTC.getDay();
+    dt.month = RTC.getMonth();
+    dt.year = RTC.getYear();
+    dt.timestamp = RTC.getEpoch(true);  // Get Unix timestamp
+    return dt;
+}
+
+void displayCurrentTime() {
+    char timeStr[20];
+    sprintf(timeStr, "%02d:%02d:%02d", RTC.getHours(), RTC.getMinutes(), RTC.getSeconds());
+    lcd.setCursor(0, 0);
+    lcd.print("Time: ");
+    lcd.print(timeStr);
+    
+    char dateStr[20];
+    sprintf(dateStr, "%02d/%02d/%04d", RTC.getDay(), RTC.getMonth(), RTC.getYear());
+    lcd.setCursor(0, 1);
+    lcd.print("Date: ");
+    lcd.print(dateStr);
+}
+
+// Add RTC time functions
+time_t getRTCEpoch() {
+    return RTC.getEpoch(true);
+}
+
+void logChannelStart(uint8_t led, uint8_t channel, float current) {
+    RuntimeTracker runtimeTracker;
+    runtimeTracker.logChannelStart(led, channel, current);
+}
+
+void logChannelEnd(uint8_t led, uint8_t channel) {
+    RuntimeTracker runtimeTracker;
+    runtimeTracker.logChannelStop(led, channel);
+}
+
+// Replace printDateTime function with printLogTime
+void printLogTime(time_t epoch_time) {
+    char buffer[32];
+    time_t t = epoch_time;
+    struct tm* timeinfo = localtime(&t);
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
+    Serial.print(buffer);
+}
+
+void printLogEntry(const RuntimeLog& log) {
+    Serial.print(F("Start: "));
+    printLogTime(log.startTime);
+    Serial.print(F(" End: "));
+    printLogTime(log.endTime);
+    Serial.print(F(" LED: "));
+    Serial.print(log.led);
+    Serial.print(F(" Channel: "));
+    Serial.print(log.channel);
+    Serial.print(F(" Current: "));
+    Serial.print(log.current_mA);
+    Serial.print(F("mA Temp: "));
+    Serial.print(log.temperature);
+    Serial.println(F("°C"));
+}
+
+// Add with other function declarations at the top
+uint16_t getLogAddress(uint8_t led, uint8_t channel);
+
+// Add the implementation after RuntimeLog structure definition
+uint16_t getLogAddress(uint8_t led, uint8_t channel) {
+    return sizeof(RuntimeLog) * (led * 4 + channel);
 }
 
