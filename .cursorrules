@@ -77,4 +77,7 @@ You are an expert embedded systems developer specializing in Arduino/C++ develop
 - Protect critical operations
 - Validate all operations
 
+## Always double check the newly generated function
+- Always check the function declaration and implementation for the newly generated function (add below the function declaration group)
+
 Follow these guidelines for all code generation and modification tasks.

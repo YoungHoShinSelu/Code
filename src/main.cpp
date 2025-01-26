@@ -21,12 +21,17 @@
 uint8_t current_led_address = LT3966_ADD1; // Default to first LED
 bool debug_mode = true;  // Enable debugging output
 
-// Add experiment state tracking
-struct ExperimentState {
+// Improved experiment timing structure using millis()
+struct ExperimentTiming {
     bool isRunning;
-    unsigned long startTime;
-    unsigned long elapsedSeconds;
-} experimentState;
+    unsigned long startMillis;  // When experiment was started
+    unsigned long elapsedSeconds;  // Current elapsed time in seconds
+    unsigned long lastUpdate;  // Last time the elapsed time was updated
+    bool firstDisplay;  // For initial display
+    int dailyErrorFast;  // Milliseconds fast per day
+    int dailyErrorBehind;  // Milliseconds behind per day
+    bool correctedToday;  // Track daily corrections
+} experimentTiming;
 
 // Menu state structure for managing menu navigation
 struct MenuStateVars {
@@ -45,6 +50,15 @@ struct PWMFreqConfig {
     const char* desc; // Description
 };
 
+struct TempTracking {
+    float currentTemp;
+    float maxTemp;
+    float minuteReadings[60];  // Store 60 readings for 1-minute average
+    uint8_t readingIndex;
+    unsigned long lastUpdateTime;
+    bool isFirstReading;
+};
+
 // Any function declarations can go here
 void handlePWMFrequencyConfig(uint8_t buttons);
 void applyPWMFrequency(uint8_t ledSelect, uint8_t channelSelect, uint8_t freqSelect);
@@ -58,7 +72,6 @@ void handleStatusSettings(uint8_t buttons);
 void updateDisplay();
 void displayErrorStatus();
 void displayVoltageLevels();
-void displayTemperature();
 void displayCurrentSettings();
 void displayPWMStatus();
 void displayCurrentStatus();
@@ -70,7 +83,7 @@ uint16_t calculatePWM(float duty_cycle, uint8_t scl);
 bool verifyI2CWriteRS(uint8_t address, uint8_t reg1, uint8_t value1, uint8_t reg2, uint8_t value2);
 bool verifyI2CWrite(uint8_t address, uint8_t reg, uint8_t value);
 void handleStatusMenu(uint8_t buttons);
-void displayLEDStateScreen(uint8_t currentLED, uint8_t buttons);  // Add this line
+void displayLEDStateScreen(uint8_t currentLED, uint8_t buttons);
 void displayTemperatureScreen();
 void displayElapsedTimeScreen();
 void toggleExperiment(bool start);
@@ -78,27 +91,26 @@ void updateTemperatureStats();
 void formatElapsedTime(char* buffer, unsigned long seconds);
 void storeTemperatureReading();
 float calculateTemperatureAverage();
-void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem);  // New declaration
+void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem);
 void handlePWMSettings(uint8_t buttons);
-char daysOfTheWeek[7][4] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};  // Using 3-letter abbreviations to save space
-// Add with other global variables
-bool showContent = false;
 void updateLEDCache();
 void displayCurrentTime();
-// New function declarations for Individual Control Enhancement
 bool isChannelAvailable(uint8_t led, uint8_t channel);
 void displayAvailableChannels(uint8_t led);
 const char* getChannelName(uint8_t channel);
 void updateChannelDisplay(uint8_t led, uint8_t channel, float brightness);
 uint8_t findNextAvailableChannel(uint8_t led, uint8_t currentChannel, bool forward);
-
-// Menu navigation functions
+void initializeExperimentState();
+void updateExperimentTime();
+void initializeExperimentTiming();
+void updateTempHistory(float* history, float newTemp, float& maxTemp);
+float calculateTempAverage(float* history);
+void updateTempTracking(TempTracking& tracker, float newTemp);
+float calculateMinuteAverage(TempTracking& tracker);
 void handleMainMenuNavigation(uint8_t buttons);
 void handleQuickControlsNavigation(uint8_t buttons);
 void handleIndividualControlNavigation(uint8_t buttons);
 void handleStatusSettingsNavigation(uint8_t buttons);
-
-// Display update functions (empty shells for now)
 void displayMainMenu();
 void displayQuickControls();
 void displayIndividualControl();
@@ -107,6 +119,15 @@ void displayStatusSettings();
 // 1. Improved Serial Input Handling
 #define SERIAL_TIMEOUT 10000  // 10 second timeout
 #define INPUT_BUFFER_SIZE 32
+float roomTempHistory[60] = {0};  // Last 60 seconds of room temperature readings
+float pcbTempHistory[60] = {0};   // Last 60 seconds of PCB temperature readings
+uint8_t tempHistoryIndex = 0;     // Current index in the circular buffer
+float maxRoomTemp = 0;            // Maximum room temperature
+float maxPCBTemp = 0;             // Maximum PCB temperature
+unsigned long lastTempUpdate = 0;  // Last temperature update time
+
+TempTracking roomTempTrack;
+TempTracking pcbTempTrack;
 
 char* readSerialUntilEnter() {
     static char buffer[INPUT_BUFFER_SIZE];
@@ -159,6 +180,7 @@ struct LEDStateCache {
     float channelBrightness[4][4];
     bool isValid;
 };
+
 // Cache update interval (1 second)
 static const unsigned long UPDATE_INTERVAL = 5000;  // Increase to 5 seconds
 
@@ -658,6 +680,9 @@ void setup() {
     initializeLED(LT3966_ADD3);
     initializeLED(LT3966_ADD4);
     
+    // Initialize experiment state
+    initializeExperimentTiming();
+    
     // Check if LCD is responding - LCD is critical
     Wire.beginTransmission(LCD_I2C_ADDR);
     byte error = Wire.endTransmission();
@@ -698,6 +723,19 @@ void setup() {
             lcd.clear();
             lcd.print(F("RTC Error"));
             delay(1000);  // Show error briefly but continue
+        } else {
+            // Verify RTC is running and has valid time
+            time_t currentTime = RTC.getEpoch(true);
+            if (currentTime < 1000000000) { // Basic sanity check for RTC time
+                Serial.println(F("RTC time invalid"));
+                lcd.clear();
+                lcd.print(F("RTC Time Error"));
+                lcd.setCursor(0, 1);
+                lcd.print(F("Set Clock"));
+                delay(2000);
+            } else {
+                Serial.println(F("RTC OK"));
+            }
         }
     } else {
         Serial.println(F("RTC not found"));
@@ -1042,6 +1080,7 @@ void handleIndividualControl(uint8_t buttons) {
             // Return to LED selection
             inRunMode = false;
             inChannelMode = false;
+            selectedLED = 0;  // Reset to first LED when exiting Run Experiment
             lcd.clear();
             lcd.print(F(">LED "));
             lcd.print(selectedLED + 1);
@@ -1069,9 +1108,7 @@ void handleIndividualControl(uint8_t buttons) {
         // Run Experiment mode
         if (buttons & BUTTON_SELECT) {
             // Start the experiment
-            experimentState.isRunning = true;
-            experimentState.startTime = millis();
-            experimentState.elapsedSeconds = 0;
+            toggleExperiment(true);  // This will handle elapsed time initialization
 
             // Turn on all configured LEDs
             for(uint8_t led = 0; led < 4; led++) {
@@ -1727,14 +1764,6 @@ void displayVoltageLevels() {
     lcd.print("PWM: " + String(currentPWMResolution));
 }
 
-void displayTemperature() {
-    // Note: This is a placeholder as temperature monitoring 
-    // requires additional hardware setup
-    lcd.print("Temp Monitor");
-    lcd.setCursor(0, 1);
-    lcd.print("Not Available");
-}
-
 void displayCurrentSettings() {
     lcd.print("PWM Res: " + String(currentPWMResolution));
     lcd.setCursor(0, 1);
@@ -2369,24 +2398,29 @@ void displayLEDStateScreen(uint8_t currentLED, uint8_t buttons) {
 }
 
 void displayTemperatureScreen() {
+    static unsigned long lastUpdate = 0;
+    static bool firstDisplay = true;
+    
     // Update temperature stats if needed
-    if (millis() - tempStats.lastUpdateTime >= 30000) { // Every 30 seconds
+    if (firstDisplay || (millis() - lastUpdate >= 30000)) {
+        lastUpdate = millis();
+        firstDisplay = false;
         updateTemperatureStats();
+        
+        lcd.clear();
+        // First line: Current temperatures
+        lcd.print(F("A:"));
+        lcd.print(tempStats.lastAmbientTemp, 1);
+        lcd.print(F(" P:"));
+        lcd.print(tempStats.lastPCBTemp, 1);
+        
+        // Second line: Min/Max
+        lcd.setCursor(0, 1);
+        lcd.print(F("L"));
+        lcd.print(tempStats.minTemp, 1);
+        lcd.print(F(" H"));
+        lcd.print(tempStats.maxTemp, 1);
     }
-    
-    lcd.clear();
-    // First line: Current temperatures
-    lcd.print(F("A:"));
-    lcd.print(tempStats.lastAmbientTemp, 1);
-    lcd.print(F(" P:"));
-    lcd.print(tempStats.lastPCBTemp, 1);
-    
-    // Second line: Min/Max
-    lcd.setCursor(0, 1);
-    lcd.print(F("L"));
-    lcd.print(tempStats.minTemp, 1);
-    lcd.print(F(" H"));
-    lcd.print(tempStats.maxTemp, 1);
 }
 
 void updateTemperatureStats() {
@@ -2411,18 +2445,29 @@ void updateTemperatureStats() {
 }
 
 void displayElapsedTimeScreen() {
-    char timeBuffer[17];
-    lcd.clear();
-    lcd.print(F("Elapsed Time:"));
-    lcd.setCursor(0, 1);
+    static unsigned long displayUpdateTime = 0;
+    unsigned long currentMillis = millis();
     
-    if (experimentState.isRunning) {
-        unsigned long currentTime = millis();
-        experimentState.elapsedSeconds = (currentTime - experimentState.startTime) / 1000;
-        formatElapsedTime(timeBuffer, experimentState.elapsedSeconds);
-        lcd.print(timeBuffer);
-    } else {
-        lcd.print(F("Not Running"));
+    // Update timing calculations
+    updateExperimentTime();
+    
+    // Update display every second or on first entry
+    if (experimentTiming.firstDisplay || currentMillis - displayUpdateTime >= 1000) {
+        displayUpdateTime = currentMillis;
+        experimentTiming.firstDisplay = false;
+        
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print(F("Elapsed Time:"));
+        
+        lcd.setCursor(0, 1);
+        if (experimentTiming.isRunning) {
+            char timeStr[16];
+            formatElapsedTime(timeStr, experimentTiming.elapsedSeconds);
+            lcd.print(timeStr);
+        } else {
+            lcd.print(F("000d 00:00:00"));
+        }
     }
 }
 
@@ -2438,19 +2483,15 @@ void formatElapsedTime(char* buffer, unsigned long seconds) {
 }
 
 void toggleExperiment(bool start) {
-    experimentState.isRunning = start;
     if (start) {
-        experimentState.startTime = millis();
-        experimentState.elapsedSeconds = 0;
-        
-        // Reset temperature stats
-        tempStats.minTemp = 0;
-        tempStats.maxTemp = 0;
-        tempStats.currentHourIndex = 0;
-        tempStats.lastUpdateTime = 0;
-        
-        // Initialize first temperature reading
-        updateTemperatureStats();
+        experimentTiming.isRunning = true;
+        experimentTiming.startMillis = millis();
+        experimentTiming.correctedToday = false;
+        experimentTiming.dailyErrorFast = 0;
+        experimentTiming.dailyErrorBehind = 0;
+    } else {
+        experimentTiming.isRunning = false;
+        experimentTiming.startMillis = 0;
     }
 }
 
@@ -2475,27 +2516,103 @@ float calculateTemperatureAverage() {
 }
 
 void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
-    const uint8_t NUM_ITEMS = 5;  // Total number of menu items
+    const uint8_t NUM_ITEMS = 4;  // Reduced from 5 (removed Current Time)
+    static uint8_t tempSubMenu = 0; // 0 = Room Temp, 1 = PCB Temp
+    static bool inTempSubMenu = false;
     
     // Reset state when first entering the menu
     if (statusDisplayState.isFirstEntry) {
         statusDisplayState.showContent = false;
         statusDisplayState.currentItem = 0;
         statusDisplayState.isFirstEntry = false;
+        inTempSubMenu = false;
     }
     
     // Handle back button
     if (buttons & BUTTON_LEFT) {
+        if (inTempSubMenu) {
+            inTempSubMenu = false;
+            statusDisplayState.showContent = true;
+            return;
+        }
         if (statusDisplayState.showContent) {
-            statusDisplayState.showContent = false;  // Return to menu navigation
-            statusDisplayState.isFirstEntry = false; // Ensure we stay in menu mode
+            statusDisplayState.showContent = false;
         } else {
-            statusDisplayState.isFirstEntry = true;  // Reset for next entry
-            return;  // Return to parent menu
+            statusDisplayState.isFirstEntry = true;
+            return;
         }
     }
     
-    // If we're showing content, display the appropriate screen
+    // If we're in temperature submenu
+    if (inTempSubMenu) {
+        if (buttons & BUTTON_UP && tempSubMenu > 0) tempSubMenu--;
+        if (buttons & BUTTON_DOWN && tempSubMenu < 1) tempSubMenu++;
+        
+        lcd.clear();
+        lcd.print(tempSubMenu == 0 ? ">" : " ");
+        lcd.print(F("Room Temp (C\xDF)"));  // \xDF is the degree symbol
+        lcd.setCursor(0, 1);
+        lcd.print(tempSubMenu == 1 ? ">" : " ");
+        lcd.print(F("PCB Temp (C\xDF)"));
+        
+        if (buttons & BUTTON_SELECT) {
+            bool exitTemp = false;
+            
+            while(!exitTemp) {
+                buttons = lcd.readButtons();
+                if (buttons & BUTTON_LEFT) {
+                    exitTemp = true;
+                    break;
+                }
+                
+                unsigned long currentMillis = millis();
+                if (currentMillis - lastTempUpdate >= 1000) {  // Update every second
+                    lastTempUpdate = currentMillis;
+                    
+                    if (tempSubMenu == 0) {
+                        // Room Temperature
+                        float roomTemp = RTC.getTemp();
+                        updateTempHistory(roomTempHistory, roomTemp, maxRoomTemp);
+                        
+                        lcd.clear();
+                        lcd.print(F("C:"));
+                        lcd.print(roomTemp, 1);
+                        lcd.print(F(",M:"));
+                        lcd.print(maxRoomTemp, 1);
+                        
+                        lcd.setCursor(0, 1);
+                        lcd.print(F("Avg:"));
+                        lcd.print(calculateTempAverage(roomTempHistory), 1);
+                    } else {
+                        // PCB Temperature
+                        float pcbTemp = tempsensor.getTemperature();
+                        updateTempHistory(pcbTempHistory, pcbTemp, maxPCBTemp);
+                        
+                        lcd.clear();
+                        lcd.print(F("C:"));
+                        lcd.print(pcbTemp, 1);
+                        lcd.print(F(",M:"));
+                        lcd.print(maxPCBTemp, 1);
+                        
+                        lcd.setCursor(0, 1);
+                        lcd.print(F("Avg:"));
+                        lcd.print(calculateTempAverage(pcbTempHistory), 1);
+                    }
+                    
+                    // Update circular buffer index
+                    tempHistoryIndex = (tempHistoryIndex + 1) % 60;
+                }
+                
+                delay(50);  // Small delay to prevent button bounce
+            }
+            
+            statusDisplayState.showContent = false;
+            return;
+        }
+        return;
+    }
+    
+    // If we're showing content for main menu items
     if (statusDisplayState.showContent) {
         switch(displayMenuItem) {
             case 0:  // LED States
@@ -2504,26 +2621,33 @@ void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
             case 1:  // Elapsed Time
                 displayElapsedTimeScreen();
                 break;
-            case 2:  // Temperature Data
-                displayTemperatureScreen();
-                break;
-            case 3:  // Current Time
-                displayCurrentTime();  // Use our new displayCurrentTime function
-                break;
-            case 4:  // Stop Experiment
+            case 2:  // Temperature Menu
+                inTempSubMenu = true;
+                tempSubMenu = 0;
+                statusDisplayState.showContent = false;
+                return;
+            case 3:  // Stop Experiment
                 lcd.clear();
-                lcd.print(F("Stop Experiment"));
+                lcd.print(F("Stop Experiment?"));
                 lcd.setCursor(0, 1);
-                lcd.print(experimentState.isRunning ? F("Running") : F("Stopped"));
-                if (buttons & BUTTON_SELECT) {
-                    toggleExperiment(false);
-                    lcd.clear();
-                    lcd.print(F("Experiment"));
-                    lcd.setCursor(0, 1);
-                    lcd.print(F("Stopped!"));
-                    delay(1000);
-                    statusDisplayState.showContent = false;
-                    showContent = false;
+                if (experimentTiming.isRunning) {
+                    lcd.print(F("Select to Stop"));
+                    if (buttons & BUTTON_SELECT) {
+                        toggleExperiment(false);  // Stop experiment and reset elapsed time
+                        // Turn off all LEDs
+                        const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
+                        for(uint8_t i = 0; i < 4; i++) {
+                            lt3966_i2c_write(addresses[i], GLBCFG, 0x0F);
+                        }
+                        lcd.clear();
+                        lcd.print(F("Experiment"));
+                        lcd.setCursor(0, 1);
+                        lcd.print(F("Stopped!"));
+                        delay(1000);
+                        statusDisplayState.showContent = false;
+                    }
+                } else {
+                    lcd.print(F("Not Running"));
                 }
                 break;
         }
@@ -2542,7 +2666,7 @@ void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
         return;
     }
     
-    // Always show menu items when not showing content
+    // Display menu items
     lcd.clear();
     uint8_t firstItem = (displayMenuItem / 2) * 2;
     
@@ -2553,8 +2677,7 @@ void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
             case 0: lcd.print(F("LED States")); break;
             case 1: lcd.print(F("Elapsed Time")); break;
             case 2: lcd.print(F("Temperature")); break;
-            case 3: lcd.print(F("Current Time")); break;
-            case 4: lcd.print(F("Stop Experiment")); break;
+            case 3: lcd.print(F("Stop Experiment")); break;
         }
     }
     
@@ -2565,8 +2688,7 @@ void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
         switch(firstItem + 1) {
             case 1: lcd.print(F("Elapsed Time")); break;
             case 2: lcd.print(F("Temperature")); break;
-            case 3: lcd.print(F("Current Time")); break;
-            case 4: lcd.print(F("Stop Experiment")); break;
+            case 3: lcd.print(F("Stop Experiment")); break;
         }
     }
 }
@@ -2720,5 +2842,110 @@ uint16_t getLogAddress(uint8_t led, uint8_t channel);
 // Add the implementation after RuntimeLog structure definition
 uint16_t getLogAddress(uint8_t led, uint8_t channel) {
     return sizeof(RuntimeLog) * (led * 4 + channel);
+}
+
+// Add this to setup() function after RTC initialization
+void initializeExperimentState() {
+    experimentTiming.isRunning = false;
+    experimentTiming.startMillis = 0;
+}
+
+// Add new timing functions
+void updateExperimentTime() {
+    if (!experimentTiming.isRunning) return;
+    
+    unsigned long currentMillis = millis();
+    // Handle millis() overflow
+    if (currentMillis < experimentTiming.lastUpdate) {
+        // Overflow occurred, adjust start time
+        experimentTiming.startMillis = currentMillis;
+        experimentTiming.lastUpdate = currentMillis;
+        return;
+    }
+    
+    // Calculate elapsed time
+    unsigned long elapsedMillis = currentMillis - experimentTiming.startMillis;
+    experimentTiming.elapsedSeconds = elapsedMillis / 1000;
+    
+    // Apply daily error correction if needed
+    unsigned long daysSinceStart = experimentTiming.elapsedSeconds / 86400;
+    if (daysSinceStart > 0 && !experimentTiming.correctedToday) {
+        // Apply corrections for timing drift
+        int totalCorrection = (experimentTiming.dailyErrorFast - experimentTiming.dailyErrorBehind) * daysSinceStart;
+        experimentTiming.elapsedSeconds += totalCorrection / 1000;
+        experimentTiming.correctedToday = true;
+    }
+    
+    experimentTiming.lastUpdate = currentMillis;
+}
+
+// Initialize experiment timing
+void initializeExperimentTiming() {
+    experimentTiming.isRunning = false;
+    experimentTiming.startMillis = 0;
+    experimentTiming.elapsedSeconds = 0;
+    experimentTiming.lastUpdate = 0;
+    experimentTiming.firstDisplay = true;
+    experimentTiming.dailyErrorFast = 0;
+    experimentTiming.dailyErrorBehind = 0;
+    experimentTiming.correctedToday = false;
+
+    // Initialize temperature tracking
+    roomTempTrack = {0};
+    pcbTempTrack = {0};
+    roomTempTrack.isFirstReading = true;
+    pcbTempTrack.isFirstReading = true;
+}
+
+// Calculate 1-minute average temperature
+float calculateMinuteAverage(TempTracking& tracker) {
+    float sum = 0;
+    int count = 0;
+    
+    for(int i = 0; i < 60; i++) {
+        if(tracker.minuteReadings[i] != 0) {
+            sum += tracker.minuteReadings[i];
+            count++;
+        }
+    }
+    
+    return count > 0 ? sum / count : 0;
+}
+
+// Update temperature tracking
+void updateTempTracking(TempTracking& tracker, float newTemp) {
+    tracker.currentTemp = newTemp;
+    
+    // Update max temperature if this is first reading or new temp is higher
+    if(tracker.isFirstReading || newTemp > tracker.maxTemp) {
+        tracker.maxTemp = newTemp;
+        tracker.isFirstReading = false;
+    }
+    
+    // Store reading in circular buffer
+    tracker.minuteReadings[tracker.readingIndex] = newTemp;
+    tracker.readingIndex = (tracker.readingIndex + 1) % 60;
+    tracker.lastUpdateTime = millis();
+}
+
+// Calculate average of temperature history
+float calculateTempAverage(float* history) {
+    float sum = 0;
+    int count = 0;
+    for(int i = 0; i < 60; i++) {
+        if(history[i] != 0) {
+            sum += history[i];
+            count++;
+        }
+    }
+    return count > 0 ? sum / count : 0;
+}
+
+// Update temperature history
+void updateTempHistory(float* history, float newTemp, float& maxTemp) {
+    history[tempHistoryIndex] = newTemp;
+    if(maxTemp == 0 || newTemp > maxTemp) {
+        maxTemp = newTemp;
+    }
 }
 
