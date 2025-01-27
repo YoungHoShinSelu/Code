@@ -93,6 +93,7 @@ void storeTemperatureReading();
 float calculateTemperatureAverage();
 void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem);
 void handlePWMSettings(uint8_t buttons);
+void handlePhaseSettings(uint8_t buttons); // Add this declaration
 void updateLEDCache();
 void displayCurrentTime();
 bool isChannelAvailable(uint8_t led, uint8_t channel);
@@ -250,7 +251,20 @@ enum StatusDisplayState {
 enum StatusMenuState {
     STATUS_SUBMENU_SELECT,  // Choosing between Status Display and PWM Settings
     STATUS_DISPLAY,         // In Status Display sub-menu
-    PWM_SETTINGS           // In PWM Settings sub-menu
+    PWM_SETTINGS,          // In PWM Settings sub-menu
+    PHASE_SETTINGS         // In Phase Settings sub-menu
+};
+
+enum PWMMenuState {
+    PWM_LED_SELECT,        // Select LED (1-4 or All)
+    PWM_CHANNEL_SELECT,    // Select Channel (default All)
+    PWM_FREQUENCY_SELECT   // Select frequency
+};
+
+enum PhaseMenuState {
+    PHASE_MODE_SELECT,     // Select In-phase or Out-of-phase
+    PHASE_LED_SELECT,      // Select LED (1-4 or All)
+    PHASE_CHANNEL_SELECT   // Select Channel
 };
 
 // Global variables
@@ -520,82 +534,142 @@ const PWMFreqConfig PWM_CONFIGS[] = {
 
 // Add this function to handle PWM frequency configuration
 void handlePWMFrequencyConfig(uint8_t buttons) {
-    static uint8_t menuState = 0;  // 0: LED select, 1: Channel select, 2: Frequency select
+    static PWMMenuState menuState = PWM_LED_SELECT;
     static uint8_t selectedLED = 0;
     static uint8_t selectedChannel = 0;
     static uint8_t selectedFreq = 0;
+    static bool firstEntry = true;
+    static bool configApplied = false;
 
-    switch(menuState) {
-        case 0:  // LED Selection
-            lcd.clear();
-            lcd.print("Select LED:");
-            lcd.setCursor(0, 1);
-            if(selectedLED == 0) {
-                lcd.print("All LEDs");
-            } else {
-                lcd.print("LED ");
-                lcd.print(selectedLED);
-            }
-            
-            if(buttons & BUTTON_UP) {
-                if(selectedLED > 0) selectedLED--;
-            }
-            if(buttons & BUTTON_DOWN) {
-                if(selectedLED < 4) selectedLED++;
-            }
-            if(buttons & BUTTON_SELECT) {
-                menuState = 1;
-            }
-            break;
-            
-        case 1:  // Channel Selection
-            lcd.clear();
-            lcd.print("Select Channel:");
-            lcd.setCursor(0, 1);
-            switch(selectedChannel) {
-                case 0: lcd.print("All Channels"); break;
-                case 1: lcd.print("White"); break;
-                case 2: lcd.print("Blue"); break;
-                case 3: lcd.print("Green"); break;
-                case 4: lcd.print("Red"); break;
-            }
-            
-            if(buttons & BUTTON_UP) {
-                if(selectedChannel > 0) selectedChannel--;
-            }
-            if(buttons & BUTTON_DOWN) {
-                if(selectedChannel < 4) selectedChannel++;
-            }
-            if(buttons & BUTTON_SELECT) {
-                menuState = 2;
-            }
-            break;
-            
-        case 2:  // Frequency Selection
-            lcd.clear();
-            lcd.print("PWM Frequency:");
-            lcd.setCursor(0, 1);
-            lcd.print(PWM_CONFIGS[selectedFreq].freq);
-            lcd.print("Hz ");
-            lcd.print(PWM_CONFIGS[selectedFreq].bits);
-            lcd.print("bit");
-            
-            if(buttons & BUTTON_UP) {
-                if(selectedFreq > 0) selectedFreq--;
-            }
-            if(buttons & BUTTON_DOWN) {
-                if(selectedFreq < 7) selectedFreq++;
-            }
-            if(buttons & BUTTON_SELECT) {
+    // If this is first entry or config was just applied, reset the menu
+    if (firstEntry || configApplied) {
+        lcd.clear();
+        switch (menuState) {
+            case PWM_LED_SELECT:
+                lcd.print(F("Select LED:"));
+                lcd.setCursor(0, 1);
+                if (selectedLED == 0) {
+                    lcd.print(F("All LEDs"));
+                } else {
+                    lcd.print(F("LED "));
+                    lcd.print(selectedLED);
+                }
+                break;
+                
+            case PWM_CHANNEL_SELECT:
+                lcd.print(F("Select Channel:"));
+                lcd.setCursor(0, 1);
+                switch (selectedChannel) {
+                    case 0: lcd.print(F("All Channels")); break;
+                    case 1: lcd.print(F("White")); break;
+                    case 2: lcd.print(F("Blue")); break;
+                    case 3: lcd.print(F("Green")); break;
+                    case 4: lcd.print(F("Red")); break;
+                }
+                break;
+                
+            case PWM_FREQUENCY_SELECT:
+                lcd.print(F("PWM Frequency:"));
+                lcd.setCursor(0, 1);
+                lcd.print(PWM_CONFIGS[selectedFreq].desc);
+                break;
+        }
+        firstEntry = false;
+        configApplied = false;
+    }
+
+    // Handle back button
+    if (buttons & BUTTON_LEFT) {
+        if (menuState > PWM_LED_SELECT) {
+            menuState = (PWMMenuState)(menuState - 1);
+            firstEntry = true;
+        }
+        return;
+    }
+
+    // Handle navigation
+    if (buttons & (BUTTON_UP | BUTTON_DOWN)) {
+        switch (menuState) {
+            case PWM_LED_SELECT:
+                if (buttons & BUTTON_UP) {
+                    if (selectedLED > 0) selectedLED--;
+                } else {
+                    if (selectedLED < 4) selectedLED++;
+                }
+                lcd.setCursor(0, 1);
+                lcd.print(F("                "));  // Clear line
+                lcd.setCursor(0, 1);
+                if (selectedLED == 0) {
+                    lcd.print(F("All LEDs"));
+                } else {
+                    lcd.print(F("LED "));
+                    lcd.print(selectedLED);
+                }
+                break;
+                
+            case PWM_CHANNEL_SELECT:
+                if (buttons & BUTTON_UP) {
+                    if (selectedChannel > 0) selectedChannel--;
+                } else {
+                    if (selectedChannel < 4) selectedChannel++;
+                }
+                lcd.setCursor(0, 1);
+                lcd.print(F("                "));  // Clear line
+                lcd.setCursor(0, 1);
+                switch (selectedChannel) {
+                    case 0: lcd.print(F("All Channels")); break;
+                    case 1: lcd.print(F("White")); break;
+                    case 2: lcd.print(F("Blue")); break;
+                    case 3: lcd.print(F("Green")); break;
+                    case 4: lcd.print(F("Red")); break;
+                }
+                break;
+                
+            case PWM_FREQUENCY_SELECT:
+                if (buttons & BUTTON_UP) {
+                    if (selectedFreq > 0) selectedFreq--;
+                } else {
+                    if (selectedFreq < 7) selectedFreq++;
+                }
+                lcd.setCursor(0, 1);
+                lcd.print(F("                "));  // Clear line
+                lcd.setCursor(0, 1);
+                lcd.print(PWM_CONFIGS[selectedFreq].desc);
+                break;
+        }
+    }
+
+    // Handle selection
+    if (buttons & BUTTON_SELECT) {
+        switch (menuState) {
+            case PWM_LED_SELECT:
+                menuState = PWM_CHANNEL_SELECT;
+                firstEntry = true;
+                break;
+                
+            case PWM_CHANNEL_SELECT:
+                menuState = PWM_FREQUENCY_SELECT;
+                firstEntry = true;
+                break;
+                
+            case PWM_FREQUENCY_SELECT:
                 // Apply the frequency settings
                 applyPWMFrequency(selectedLED, selectedChannel, selectedFreq);
-                menuState = 0;  // Return to LED selection
-            }
-            break;
-    }
-    
-    if(buttons & BUTTON_LEFT && menuState > 0) {
-        menuState--;
+                
+                // Show confirmation
+                lcd.clear();
+                lcd.print(F("PWM Updated!"));
+                delay(1000);
+                
+                // Reset menu state for next time
+                menuState = PWM_LED_SELECT;
+                selectedLED = 0;
+                selectedChannel = 0;
+                selectedFreq = 0;
+                firstEntry = true;
+                configApplied = true;
+                break;
+        }
     }
 }
 
@@ -1260,12 +1334,14 @@ void handleIndividualControl(uint8_t buttons) {
 }
 
 void handleStatusSettings(uint8_t buttons) {
+    static uint8_t subMenuSelection = 0;  // 0 = Status Display, 1 = PWM Settings, 2 = Phase Settings
+    static MenuStateVars statusDisplayState;
+    static uint8_t displayMenuItem = 0;
     static StatusMenuState menuState = STATUS_SUBMENU_SELECT;
-    static uint8_t subMenuSelection = 0;  // 0 = Status Display, 1 = PWM Settings
-    static uint8_t displayMenuItem = 0;    // For Status Display sub-menu items
+    const uint8_t NUM_SUBMENU_ITEMS = 3;  // Updated to include Phase Settings
+    
     // Handle back button
     if (buttons & BUTTON_LEFT) {
-        // Reset status display state when navigating back
         statusDisplayState = MenuStateVars();
         if (menuState == STATUS_SUBMENU_SELECT) {
             currentMenu = MAIN_MENU;
@@ -1295,26 +1371,51 @@ void handleStatusSettings(uint8_t buttons) {
                 if (subMenuSelection > 0) subMenuSelection--;
             }
             if (buttons & BUTTON_DOWN) {
-                if (subMenuSelection < 1) subMenuSelection++;
+                if (subMenuSelection < NUM_SUBMENU_ITEMS - 1) subMenuSelection++;
             }
             
             // Then update display
             lcd.clear();
-            lcd.print(subMenuSelection == 0 ? ">" : " ");
-            lcd.print(F("Status Display"));
-            lcd.setCursor(0, 1);
-            lcd.print(subMenuSelection == 1 ? ">" : " ");
-            lcd.print(F("PWM Settings"));
+            // First line
+            if (subMenuSelection <= 1) {
+                lcd.print(subMenuSelection == 0 ? ">" : " ");
+                lcd.print(F("Status Display"));
+                lcd.setCursor(0, 1);
+                lcd.print(subMenuSelection == 1 ? ">" : " ");
+                lcd.print(F("PWM Settings"));
+            } else {
+                lcd.print(subMenuSelection == 1 ? ">" : " ");
+                lcd.print(F("PWM Settings"));
+                lcd.setCursor(0, 1);
+                lcd.print(subMenuSelection == 2 ? ">" : " ");
+                lcd.print(F("Phase Settings"));
+            }
             
             if (buttons & BUTTON_SELECT) {
-                menuState = subMenuSelection == 0 ? STATUS_DISPLAY : PWM_SETTINGS;
+                switch (subMenuSelection) {
+                    case 0:
+                        menuState = STATUS_DISPLAY;
+                        break;
+                    case 1:
+                        menuState = PWM_SETTINGS;
+                        break;
+                    case 2:
+                        menuState = PHASE_SETTINGS;
+                        break;
+                }
                 displayMenuItem = 0;  // Reset sub-menu position
                 
                 // Immediately show the selected submenu
-                if (menuState == STATUS_DISPLAY) {
-                    handleStatusDisplay(0, displayMenuItem);  // Pass 0 for buttons to just display
-                } else {
-                    handlePWMSettings(0);  // Pass 0 for buttons to just display
+                switch (menuState) {
+                    case STATUS_DISPLAY:
+                        handleStatusDisplay(0, displayMenuItem);
+                        break;
+                    case PWM_SETTINGS:
+                        handlePWMSettings(0);
+                        break;
+                    case PHASE_SETTINGS:
+                        handlePhaseSettings(0);
+                        break;
                 }
             }
             break;
@@ -1325,6 +1426,10 @@ void handleStatusSettings(uint8_t buttons) {
             
         case PWM_SETTINGS:
             handlePWMSettings(buttons);
+            break;
+            
+        case PHASE_SETTINGS:
+            handlePhaseSettings(buttons);
             break;
     }
 }
@@ -2695,33 +2800,62 @@ void handleStatusDisplay(uint8_t buttons, uint8_t& displayMenuItem) {
 
 void handlePWMSettings(uint8_t buttons) {
     static uint8_t pwmMenuItem = 0;  // 0 = View Current PWM, 1 = Change PWM Config
+    static bool inSubmenu = false;    // Track if we're in a submenu
     const uint8_t NUM_ITEMS = 2;
     
-    // Handle navigation
-    if (buttons & BUTTON_UP && pwmMenuItem > 0) {
-        pwmMenuItem--;
-    }
-    if (buttons & BUTTON_DOWN && pwmMenuItem < NUM_ITEMS - 1) {
-        pwmMenuItem++;
+    // Handle back button
+    if (buttons & BUTTON_LEFT) {
+        if (inSubmenu) {
+            inSubmenu = false;
+            // Redraw the PWM settings menu
+            lcd.clear();
+            lcd.print(pwmMenuItem == 0 ? ">" : " ");
+            lcd.print(F("View PWM"));
+            lcd.setCursor(0, 1);
+            lcd.print(pwmMenuItem == 1 ? ">" : " ");
+            lcd.print(F("Change PWM"));
+        } else {
+            // Return to Status/Settings menu
+            return;
+        }
+        return;
     }
     
-    // Display menu
-    lcd.clear();
-    lcd.print(pwmMenuItem == 0 ? ">" : " ");
-    lcd.print(F("View PWM"));
-    lcd.setCursor(0, 1);
-    lcd.print(pwmMenuItem == 1 ? ">" : " ");
-    lcd.print(F("Change PWM"));
-    
-    // Handle selection
-    if (buttons & BUTTON_SELECT) {
-        switch(pwmMenuItem) {
-            case 0:  // View Current PWM
-                displayPWMStatus();
-                break;
-            case 1:  // Change PWM Config
-                handlePWMFrequencyConfig(buttons);
-                break;
+    if (!inSubmenu) {
+        // Handle main PWM settings menu navigation
+        if (buttons & BUTTON_UP && pwmMenuItem > 0) {
+            pwmMenuItem--;
+        }
+        if (buttons & BUTTON_DOWN && pwmMenuItem < NUM_ITEMS - 1) {
+            pwmMenuItem++;
+        }
+        
+        // Display menu
+        lcd.clear();
+        lcd.print(pwmMenuItem == 0 ? ">" : " ");
+        lcd.print(F("View PWM"));
+        lcd.setCursor(0, 1);
+        lcd.print(pwmMenuItem == 1 ? ">" : " ");
+        lcd.print(F("Change PWM"));
+        
+        // Handle selection
+        if (buttons & BUTTON_SELECT) {
+            inSubmenu = true;
+            switch(pwmMenuItem) {
+                case 0:  // View Current PWM
+                    displayPWMStatus();
+                    break;
+                case 1:  // Change PWM Config
+                    handlePWMFrequencyConfig(0);  // Initialize with no buttons pressed
+                    break;
+            }
+        }
+    } else {
+        // Handle submenu
+        if (pwmMenuItem == 0) {
+            displayPWMStatus();  // Keep showing the PWM status
+        } else {
+            handlePWMFrequencyConfig(buttons);  // Pass through button presses
         }
     }
 }
@@ -2946,6 +3080,166 @@ void updateTempHistory(float* history, float newTemp, float& maxTemp) {
     history[tempHistoryIndex] = newTemp;
     if(maxTemp == 0 || newTemp > maxTemp) {
         maxTemp = newTemp;
+    }
+}
+
+// Function declarations
+void handlePhaseSettings(uint8_t buttons);
+void applyPhaseConfig(uint8_t ledSelect, uint8_t channelSelect, bool inPhase);
+
+void handlePhaseSettings(uint8_t buttons) {
+    static PhaseMenuState menuState = PHASE_MODE_SELECT;
+    static bool inPhaseMode = true;  // true = In-phase, false = Out-of-phase
+    static uint8_t selectedLED = 0;   // 0 = All LEDs, 1-4 = Specific LED
+    static uint8_t selectedChannel = 0; // 0 = All channels, 1-4 = Specific channel
+    static bool firstEntry = true;
+    static bool configApplied = false;
+
+    // If this is first entry or config was just applied, reset the menu
+    if (firstEntry || configApplied) {
+        lcd.clear();
+        switch (menuState) {
+            case PHASE_MODE_SELECT:
+                lcd.print(F("Phase Mode:"));
+                lcd.setCursor(0, 1);
+                lcd.print(inPhaseMode ? F("In-Phase") : F("Out-of-Phase"));
+                break;
+                
+            case PHASE_LED_SELECT:
+                lcd.print(F("Select LED:"));
+                lcd.setCursor(0, 1);
+                if (selectedLED == 0) {
+                    lcd.print(F("All LEDs"));
+                } else {
+                    lcd.print(F("LED "));
+                    lcd.print(selectedLED);
+                }
+                break;
+                
+            case PHASE_CHANNEL_SELECT:
+                lcd.print(F("Select Channel:"));
+                lcd.setCursor(0, 1);
+                switch (selectedChannel) {
+                    case 0: lcd.print(F("All Channels")); break;
+                    case 1: lcd.print(F("White")); break;
+                    case 2: lcd.print(F("Blue")); break;
+                    case 3: lcd.print(F("Green")); break;
+                    case 4: lcd.print(F("Red")); break;
+                }
+                break;
+        }
+        firstEntry = false;
+        configApplied = false;
+    }
+
+    // Handle back button
+    if (buttons & BUTTON_LEFT) {
+        if (menuState > PHASE_MODE_SELECT) {
+            menuState = (PhaseMenuState)(menuState - 1);
+            firstEntry = true;
+        } else {
+            return;  // Exit to main menu
+        }
+        return;
+    }
+
+    // Handle navigation
+    if (buttons & (BUTTON_UP | BUTTON_DOWN)) {
+        switch (menuState) {
+            case PHASE_MODE_SELECT:
+                inPhaseMode = !inPhaseMode;  // Toggle between In-phase and Out-of-phase
+                lcd.setCursor(0, 1);
+                lcd.print(F("                "));  // Clear line
+                lcd.setCursor(0, 1);
+                lcd.print(inPhaseMode ? F("In-Phase") : F("Out-of-Phase"));
+                break;
+                
+            case PHASE_LED_SELECT:
+                if (buttons & BUTTON_UP) {
+                    if (selectedLED > 0) selectedLED--;
+                } else {
+                    if (selectedLED < 4) selectedLED++;
+                }
+                lcd.setCursor(0, 1);
+                lcd.print(F("                "));  // Clear line
+                lcd.setCursor(0, 1);
+                if (selectedLED == 0) {
+                    lcd.print(F("All LEDs"));
+                } else {
+                    lcd.print(F("LED "));
+                    lcd.print(selectedLED);
+                }
+                break;
+                
+            case PHASE_CHANNEL_SELECT:
+                if (buttons & BUTTON_UP) {
+                    if (selectedChannel > 0) selectedChannel--;
+                } else {
+                    if (selectedChannel < 4) selectedChannel++;
+                }
+                lcd.setCursor(0, 1);
+                lcd.print(F("                "));  // Clear line
+                lcd.setCursor(0, 1);
+                switch (selectedChannel) {
+                    case 0: lcd.print(F("All Channels")); break;
+                    case 1: lcd.print(F("White")); break;
+                    case 2: lcd.print(F("Blue")); break;
+                    case 3: lcd.print(F("Green")); break;
+                    case 4: lcd.print(F("Red")); break;
+                }
+                break;
+        }
+    }
+
+    // Handle selection
+    if (buttons & BUTTON_SELECT) {
+        switch (menuState) {
+            case PHASE_MODE_SELECT:
+                menuState = PHASE_LED_SELECT;
+                firstEntry = true;
+                break;
+                
+            case PHASE_LED_SELECT:
+                menuState = PHASE_CHANNEL_SELECT;
+                firstEntry = true;
+                break;
+                
+            case PHASE_CHANNEL_SELECT:
+                // Apply the phase settings
+                applyPhaseConfig(selectedLED, selectedChannel, inPhaseMode);
+                
+                // Show confirmation
+                lcd.clear();
+                lcd.print(F("Phase Updated!"));
+                delay(1000);
+                
+                // Reset menu state for next time
+                menuState = PHASE_MODE_SELECT;
+                selectedLED = 0;
+                selectedChannel = 0;
+                firstEntry = true;
+                configApplied = true;
+                break;
+        }
+    }
+}
+
+void applyPhaseConfig(uint8_t ledSelect, uint8_t channelSelect, bool inPhase) {
+    const uint8_t addresses[] = {LT3966_ADD1, LT3966_ADD2, LT3966_ADD3, LT3966_ADD4};
+    
+    // Determine which LEDs to configure
+    uint8_t startLED = (ledSelect == 0) ? 0 : ledSelect - 1;
+    uint8_t endLED = (ledSelect == 0) ? 3 : ledSelect - 1;
+    
+    // Determine which channels to configure
+    uint8_t startCh = (channelSelect == 0) ? 0 : channelSelect - 1;
+    uint8_t endCh = (channelSelect == 0) ? 3 : channelSelect - 1;
+    
+    // Configure selected LEDs and channels
+    for(uint8_t led = startLED; led <= endLED; led++) {
+        for(uint8_t ch = startCh; ch <= endCh; ch++) {
+            configureChannel(addresses[led], ch, inPhase);
+        }
     }
 }
 
